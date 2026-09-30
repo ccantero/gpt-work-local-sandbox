@@ -24,32 +24,66 @@ guidance.
   coherent commit for one coherent task.
 - Never include temporary review or handoff artifacts in a commit.
 
-## Mandatory handoff
+## Work artifacts
 
-At the end of every meaningful work session, generate or overwrite
-`WORK_REPORT.md`. It must be self-contained and understandable without access to
-the conversation. Include:
+At the end of substantive work, generate or overwrite the artifact appropriate
+to the work performed:
+
+- Investigation, research, or substantial analysis: `INVESTIGATION_WORK.md`.
+- Planning, design, or architecture: `PLANNING_WORK.md`.
+- Implementation or repository modification: `IMPLEMENTATION_WORK.md`.
+
+Multiple artifacts are appropriate only when a task genuinely contains multiple
+substantive phases. Do not create separate investigation or planning artifacts
+for routine analysis or planning performed as part of a normal implementation.
+Every artifact must be self-contained and understandable without access to the
+conversation.
+
+`INVESTIGATION_WORK.md` must include:
+
+- the question or problem investigated;
+- relevant context;
+- evidence inspected;
+- findings;
+- uncertainties and limitations;
+- conclusions; and
+- the recommended next step.
+
+`PLANNING_WORK.md` must include:
+
+- the objective;
+- relevant current state;
+- proposed approach;
+- important design decisions;
+- implementation steps;
+- risks and failure modes;
+- acceptance criteria; and
+- unresolved questions.
+
+`IMPLEMENTATION_WORK.md` must include:
 
 - the requested task;
-- work performed;
+- implementation performed;
 - important decisions and assumptions;
 - files changed;
 - tests and checks executed, with results;
-- the commit hash and message, if a commit was created;
+- deviations from the plan, if any;
+- the commit hash and message, if applicable;
 - final Git status;
 - unresolved issues or warnings; and
 - the recommended next step.
 
-If the session created a commit, generate or overwrite `WORK_CHANGES.patch`
-with:
+If the task created a commit, additionally generate or overwrite
+`WORK_CHANGES.patch` with:
 
 ```bash
 git format-patch -1 HEAD --stdout > WORK_CHANGES.patch
 ```
 
-The patch must represent the commit created by the session. If no commit was
-created, remove any stale `WORK_CHANGES.patch` so it cannot be mistaken for
-current work.
+The patch must represent the commit created during the current task. If no
+commit was created during the current task, remove any stale
+`WORK_CHANGES.patch` so it cannot be mistaken for current work.
 
-`WORK_REPORT.md` and `WORK_CHANGES.patch` are ephemeral handoff artifacts. They
-must remain ignored and must never be committed.
+`INVESTIGATION_WORK.md`, `PLANNING_WORK.md`, `IMPLEMENTATION_WORK.md`, and
+`WORK_CHANGES.patch` are ephemeral handoff artifacts. They must remain ignored
+and must never be committed.

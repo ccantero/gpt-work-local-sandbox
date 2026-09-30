@@ -8,5 +8,7 @@ snapshots/
 *.sql.*
 
 # Ephemeral agent handoff artifacts.
-WORK_REPORT.md
+INVESTIGATION_WORK.md
+PLANNING_WORK.md
+IMPLEMENTATION_WORK.md
 WORK_CHANGES.patch

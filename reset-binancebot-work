@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly PG_BIN="/usr/bin"
+readonly BASELINE="binancebot_work_baseline"
+readonly WORK_DB="binancebot_work"
+readonly WORK_OWNER="local-gpt-work"
+
+"${PG_BIN}/dropdb" --if-exists "${WORK_DB}"
+
+"${PG_BIN}/createdb" \
+    --strategy=file_copy \
+    --template="${BASELINE}" \
+    --owner="${WORK_OWNER}" \
+    "${WORK_DB}"

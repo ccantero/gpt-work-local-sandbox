@@ -1,0 +1,12 @@
+# Database snapshots and dumps may contain production data and credentials.
+snapshots/
+*.dump
+*.dump.*
+*.backup
+*.backup.*
+*.sql
+*.sql.*
+
+# Ephemeral agent handoff artifacts.
+WORK_REPORT.md
+WORK_CHANGES.patch

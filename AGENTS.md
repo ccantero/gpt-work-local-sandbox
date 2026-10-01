@@ -8,10 +8,22 @@ guidance.
 
 - Treat `binancebot_work` as disposable and `binancebot_work_baseline` as
   protected.
+- Preserve two separate administrative operations: routine work reset and
+  occasional baseline refresh. Never combine them or broaden the reset helper
+  into a baseline-administration command.
 - Do not access production credentials or production systems unless the human
   explicitly authorizes it.
-- Do not use `sudo`, change system configuration, or execute
-  `refresh_baseline.sh` unless the human explicitly authorizes it.
+- Do not use `sudo`, change system configuration, modify PostgreSQL, or execute
+  either administrative helper unless the human explicitly authorizes it.
+- Never ask a human to run repository code with `sudo` or as `postgres`.
+  Privileged execution must use the separately reviewed, protected installed
+  copies documented in `README.md`.
+- The only privileged operation intended to be available to `local-gpt-work`
+  is exact, no-argument execution of
+  `/usr/local/sbin/reset-binancebot-work` as the `postgres` OS user. Baseline
+  refresh is initiated by `cristhian` through the separately installed
+  `/usr/local/sbin/refresh-binancebot-baseline`; it is never authorized to
+  `local-gpt-work`.
 - Do not push Git changes unless the human explicitly authorizes it.
 - Never weaken filesystem, PostgreSQL, or privilege boundaries to make a task
   easier.

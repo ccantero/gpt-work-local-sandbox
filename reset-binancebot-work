@@ -1,14 +1,69 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
 
-readonly PG_BIN="/usr/bin"
+if (( $# != 0 )); then
+    echo "Usage: $0" >&2
+    exit 64
+fi
+
+readonly PG_BIN="/usr/lib/postgresql/17/bin"
+readonly PG_SOCKET="/var/run/postgresql"
+readonly PG_PORT="5432"
+readonly PG_ADMIN="postgres"
 readonly BASELINE="binancebot_work_baseline"
 readonly WORK_DB="binancebot_work"
 readonly WORK_OWNER="local-gpt-work"
 
-"${PG_BIN}/dropdb" --if-exists "${WORK_DB}"
+# Do not allow libpq environment state to redirect this privileged helper.
+unset PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT PGDATABASE
+unset PGHOST PGHOSTADDR PGOPTIONS PGPASSFILE PGPASSWORD PGPORT PGREQUIREAUTH
+unset PGSERVICE PGSERVICEFILE PGSSLCERT PGSSLCRL PGSSLKEY PGSSLMODE
+unset PGSSLROOTCERT PGSSLSNI PGTARGETSESSIONATTRS PGUSER
+
+RUN_AS=""
+if ! RUN_AS="$(/usr/bin/id -un)"; then
+    echo "ERROR: could not determine execution identity" >&2
+    exit 69
+fi
+if [[ "${RUN_AS}" != "postgres" ]]; then
+    echo "ERROR: reset must run as the postgres OS user" >&2
+    exit 69
+fi
+
+BASELINE_EXISTS=""
+if ! BASELINE_EXISTS="$(
+    "${PG_BIN}/psql" -X \
+        --host="${PG_SOCKET}" \
+        --port="${PG_PORT}" \
+        --username="${PG_ADMIN}" \
+        --no-password \
+        --dbname=postgres \
+        -Atqc "SELECT count(*) FROM pg_database WHERE datname='${BASELINE}'"
+)"; then
+    echo "ERROR: could not verify baseline; work was not modified" >&2
+    exit 69
+fi
+if [[ "${BASELINE_EXISTS}" != "1" ]]; then
+    echo "ERROR: baseline database does not exist: ${BASELINE}" >&2
+    echo "Work was not modified." >&2
+    exit 69
+fi
+
+"${PG_BIN}/dropdb" \
+    --host="${PG_SOCKET}" \
+    --port="${PG_PORT}" \
+    --username="${PG_ADMIN}" \
+    --no-password \
+    --if-exists \
+    --force \
+    "${WORK_DB}"
 
 "${PG_BIN}/createdb" \
+    --host="${PG_SOCKET}" \
+    --port="${PG_PORT}" \
+    --username="${PG_ADMIN}" \
+    --no-password \
     --strategy=file_copy \
     --template="${BASELINE}" \
     --owner="${WORK_OWNER}" \

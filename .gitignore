@@ -7,6 +7,10 @@ snapshots/
 *.sql
 *.sql.*
 
+# Non-authoritative host inspection inventories.
+baseline-tables.txt
+candidate-tables.txt
+
 # Ephemeral agent handoff artifacts.
 INVESTIGATION_WORK.md
 PLANNING_WORK.md

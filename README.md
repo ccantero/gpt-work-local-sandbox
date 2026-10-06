@@ -81,6 +81,27 @@ the baseline.
 This is a PostgreSQL and filesystem boundary, not general operating-system
 isolation. Use a VM or container when stronger process isolation is required.
 
+## Infrastructure and application source
+
+`gpt-work-local-sandbox` is infrastructure, not the application repository
+that Work normally modifies. Its authoritative development checkout is owned
+by `cristhian`. Reviewed infrastructure commits will be distributed through a
+normal GitHub repository to the isolated runtime checkout at
+`/home/local-gpt-work/git/gpt-work-local-sandbox`.
+
+Application repositories use a different path: an approved commit is exported
+as tracked source, transferred through `/home/local-gpt-work/repos`, and
+initialized under `/home/local-gpt-work/workspaces/<project>` with independent
+one-commit Git history and no remote. `local-gpt-work` does not receive normal
+GitHub access or human credentials for those application repositories. See
+`WORKFLOW.md` for the two-phase process.
+
+The isolated user intentionally owns and controls its `repos/` and
+`workspaces/` directories. Their contents are disposable workflow state, not a
+security boundary. The protected boundaries remain the human repositories and
+credentials, production credentials and dumps, PostgreSQL baseline, installed
+privileged helpers, host configuration, and narrow sudo policy.
+
 ## Routine development and work reset
 
 Connect only to the disposable work database:
@@ -218,6 +239,11 @@ must have the same protected access posture as baseline.
 
 ## Repository contents
 
+- `WORKFLOW.md`: human-to-Work source preparation and review workflow.
+- `prepare-work-source.sh`: human-side deterministic tracked-source handoff
+  creation.
+- `initialize-work-workspace.sh`: isolated-user handoff verification and
+  independent Work repository creation.
 - `refresh_baseline.sh`: source for protected baseline refresh.
 - `reset-binancebot-work`: source for narrow work reset.
 - `do_snapshot.sh`: private custom-format snapshot creation.

@@ -1,36 +1,58 @@
 # GPT Work PostgreSQL sandbox
 
-This repository contains reviewable source and operating guidance for a local
-PostgreSQL development sandbox. Its central security property is that the
-development database is disposable while its source baseline is protected from
-the development account.
+This repository contains reviewable source and operating guidance for running
+ChatGPT Work under a restricted Linux account with a local PostgreSQL
+development sandbox. The architecture is reusable: application source arrives
+through an approved, credential-free handoff; the application workspace and
+development database are disposable; and human-owned repositories,
+credentials, privileged host configuration, and baseline resources remain
+protected.
 
 ## Architecture contract
 
-The two databases deliberately have different trust levels.
+The protected baseline and disposable Work database deliberately belong to
+different trust domains.
 
-| Database | Owner | Contract |
+| Generic resource | Owner | Contract |
 | --- | --- | --- |
-| `binancebot_work_baseline` | `postgres` | Protected reference database. `local-gpt-work` must not be able to connect, create in it, replace it, refresh it, rename it, drop it, or administer it. |
-| `binancebot_work` | `local-gpt-work` | Disposable development database. `local-gpt-work` may freely use, modify, or destroy it. It can be recreated from the protected baseline. |
+| protected baseline database | PostgreSQL administrator | The restricted Work account must not be able to connect, create in it, replace it, refresh it, rename it, drop it, or administer it. |
+| disposable Work database | restricted Work role | Work may freely use, modify, or destroy it. It can be recreated from the protected baseline. |
 
-Baseline refresh may temporarily use
-`binancebot_work_baseline_candidate` and
-`binancebot_work_baseline_previous`. Both are protected databases owned and
-administered by `postgres`; they are not additional development databases.
+Baseline refresh may temporarily use protected candidate and previous-baseline
+databases. They are administrator-owned recovery state, not additional
+development databases.
 
 The two administrative operations are deliberately separate:
 
-- **Baseline refresh** is an occasional operation initiated by `cristhian`.
+- **Baseline refresh** is an occasional operation initiated by the human
+  administrator.
   It replaces the protected baseline from an approved production-derived dump
   through the candidate/promotion workflow. `local-gpt-work` is not authorized
   to perform it.
-- **Work reset** is a routine operation available to `local-gpt-work`. It drops
-  and recreates only `binancebot_work` from the protected baseline.
+- **Work reset** is a routine operation available to the restricted Work
+  account. It drops and recreates only the disposable Work database from the
+  protected baseline.
 
 These operations must never be combined. Access to work reset must expose no
 path that can refresh, replace, drop, rename, or otherwise administer the
 baseline.
+
+## Reference implementation values
+
+The reusable architecture does not require the names used on the host where it
+was developed. The current privileged helper sources are a fixed-purpose
+reference implementation and still pin these installation values:
+
+- restricted account and database owner: `local-gpt-work`;
+- disposable database: `binancebot_work`;
+- protected database family: `binancebot_work_baseline*`; and
+- installed commands: `/usr/local/sbin/reset-binancebot-work` and
+  `/usr/local/sbin/refresh-binancebot-baseline`.
+
+Occurrences of those values in commands below describe that validated
+installation. Adapting the helpers for another application or host is a
+separate, reviewed migration; do not make privileged reset targets selectable
+at runtime.
 
 ## Source and installed commands
 
@@ -39,7 +61,7 @@ privileged executables:
 
 | Repository source | Protected installed command | Authorized actor |
 | --- | --- | --- |
-| `refresh_baseline.sh` | `/usr/local/sbin/refresh-binancebot-baseline` | `cristhian`, manually as the `postgres` OS user |
+| `refresh_baseline.sh` | `/usr/local/sbin/refresh-binancebot-baseline` | human administrator, manually as the `postgres` OS user |
 | `reset-binancebot-work` | `/usr/local/sbin/reset-binancebot-work` | `local-gpt-work`, exactly as the `postgres` OS user with no arguments |
 
 Both installed files and every controlling parent directory must be protected
@@ -61,7 +83,7 @@ Administrative sources pin PostgreSQL 17 at socket `/var/run/postgresql`, port
 `5432`, and database role `postgres`. They clear connection-related `PG*` state
 so a caller cannot redirect privileged operations.
 
-These host facts were human-verified for this project:
+These installation facts were human-verified on the reference host:
 
 - PostgreSQL server version is 17.10;
 - both databases use `pg_default` and are approximately 21 GB;
@@ -84,17 +106,16 @@ isolation. Use a VM or container when stronger process isolation is required.
 ## Infrastructure and application source
 
 `gpt-work-local-sandbox` is infrastructure, not the application repository
-that Work normally modifies. Its authoritative development checkout is owned
-by `cristhian`. Reviewed infrastructure commits will be distributed through a
-normal GitHub repository to the isolated runtime checkout at
-`/home/local-gpt-work/git/gpt-work-local-sandbox`.
+that Work normally modifies. The infrastructure repository is public. A
+restricted runtime may clone and pull reviewed infrastructure commits over
+public HTTPS without an SSH key, token, or other GitHub credentials.
 
-Application repositories use a different path: an approved commit is exported
-as tracked source, transferred through `/home/local-gpt-work/repos`, and
-initialized under `/home/local-gpt-work/workspaces/<project>` with independent
-one-commit Git history and no remote. `local-gpt-work` does not receive normal
-GitHub access or human credentials for those application repositories. See
-`WORKFLOW.md` for the two-phase process.
+This is a narrow control-plane exception. Application repositories use a
+different path: the human operator exports an approved commit as tracked
+source plus provenance, transfers that pair to the restricted account, and
+initializes a disposable workspace with independent one-commit Git history and
+no remote. The restricted account receives neither normal GitHub access nor
+human credentials for application repositories. See `WORKFLOW.md`.
 
 The isolated user intentionally owns and controls its `repos/` and
 `workspaces/` directories. Their contents are disposable workflow state, not a
@@ -141,8 +162,8 @@ definitions as the application role.
 ## Protected baseline refresh
 
 Never run `refresh_baseline.sh` from the repository with privilege. After a
-reviewed version has been deliberately installed, `cristhian` invokes only the
-protected copy as the `postgres` OS user:
+reviewed version has been deliberately installed, the human administrator
+invokes only the protected copy as the `postgres` OS user:
 
 ```bash
 sudo -u postgres /usr/local/sbin/refresh-binancebot-baseline \

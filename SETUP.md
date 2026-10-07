@@ -7,6 +7,13 @@ Its purpose is operational: start from a new host, establish the
 privilege boundary, install the reviewed helpers, and prove that the
 boundary works.
 
+The architecture is generic, but the checked-in privileged helpers are a
+fixed-purpose reference implementation. Commands in this runbook therefore use
+the validated installation names `local-gpt-work`, `binancebot_work`, and
+`binancebot_work_baseline*`. Treat those values as implementation coupling to
+adapt and review before deploying another application; never turn the reset
+helper into a runtime-selectable database administration command.
+
 `README.md` remains the architecture contract. `AGENTS.md` remains the
 agent behavior contract. If this runbook conflicts with either one, stop
 and resolve the discrepancy before continuing.
@@ -86,7 +93,11 @@ reference notebook and reached the following accepted state:
 -   refresh helper installed `root:root 0755`;
 -   sudo exposes only the exact no-argument reset as OS user `postgres`;
 -   snapshot directory is `0700`;
--   snapshot dumps are `0600`.
+-   snapshot dumps are `0600`;
+-   the public infrastructure repository can be cloned and pulled over HTTPS
+    by the restricted account without GitHub credentials; and
+-   the complete application source handoff and isolated workspace
+    initialization flow passed its real-host two-account validation.
 
 The fresh-machine bootstrap below is intended to reproduce that state,
 but was not itself executed end-to-end during the reference promotion.
@@ -163,7 +174,7 @@ VM.
 
 ### Infrastructure checkout and application directories
 
-The reference host has these directories:
+The validated reference installation has these directories:
 
 ``` text
 /home/local-gpt-work/git/gpt-work-local-sandbox
@@ -171,15 +182,13 @@ The reference host has these directories:
 /home/local-gpt-work/workspaces
 ```
 
-The first is the isolated runtime checkout of this infrastructure repository.
-The authoritative development checkout is
-`/home/cristhian/Dev/gpt-work-local-sandbox`. Reviewed infrastructure changes
-will follow the normal human commit/push and isolated clone/pull path. This Git
-distribution exception applies only to the infrastructure repository, not to
-application projects. If the future infrastructure GitHub repository is
-private, the read-only authentication mechanism for `local-gpt-work` remains a
-separate unresolved design decision; do not reuse human credentials or grant
-access to arbitrary application repositories.
+The first is the restricted runtime checkout of this infrastructure
+repository. The repository is public: reviewed infrastructure changes follow
+the normal human commit/push and restricted clone/pull path over public HTTPS.
+The restricted account needs no GitHub token, SSH key, or human credentials for
+this synchronization. This control-plane exception applies only to the
+infrastructure repository; application repositories continue to use approved
+archives and provenance.
 
 `repos/` receives prepared application source/provenance and, in a future
 workflow, returned review artifacts. `workspaces/` contains disposable
@@ -208,11 +217,11 @@ directories, including the ability to modify or remove its handoff artifacts.
 Archive SHA-256/provenance checks remain useful for integrity and deterministic
 pairing, but do not protect artifacts from their owner.
 
-Because mode `0755` does not normally let `cristhian` write into a directory
-owned by `local-gpt-work`, prepare source artifacts in a human-writable staging
-location and use the already-authorized human host procedure to place copies in
-`repos/` with `local-gpt-work` ownership. This repository does not define a new
-privilege mechanism for that transfer.
+Because mode `0755` does not normally let the human operator write into a
+directory owned by `local-gpt-work`, prepare source artifacts in a
+human-writable staging location and use the already-authorized host procedure
+to place copies in `repos/` with `local-gpt-work` ownership. This repository
+does not define a new privilege mechanism for that transfer.
 
 The human-side preparation command has been exercised on the real host with a
 disposable Git repository. Its approved commit contained tracked `.gitignore`
@@ -221,10 +230,13 @@ archive and provenance were created successfully; the archive contained the
 two tracked files and contained neither `.env` nor upstream `.git`. Copies were
 then placed in `repos/` with `local-gpt-work` ownership.
 
-This is not an end-to-end Step 3 validation. The isolated runtime checkout did
-not yet contain `initialize-work-workspace.sh`, so real-host workspace
-initialization has not been executed or accepted. The isolated tests in this
-repository do not replace that pending two-user host check.
+The complete Step 3 flow was subsequently validated on the real host. As the
+restricted account, `initialize-work-workspace.sh` created a clean independent
+repository with exactly one baseline commit, no remote, the approved upstream
+commit in the baseline message, both tracked files present, and the ignored
+`.env` absent. A simulated Work edit produced only the expected `hello.txt`
+status and diff. Step 3 therefore has no pending real-host initialization check;
+see `WORKFLOW.md` for the concise validation record.
 
 ------------------------------------------------------------------------
 
@@ -915,9 +927,8 @@ answer all of these with evidence:
     mode `0755`.
 -   [ ] `/home/local-gpt-work/workspaces` is
     `local-gpt-work:local-gpt-work` mode `0755`.
--   [ ] Infrastructure Git distribution is distinct from application source
-    handoff; any required private-repository read authentication is explicitly
-    resolved without human or application-repository credentials.
+-   [ ] Public-HTTPS infrastructure Git distribution is distinct from
+    application source handoff and requires no GitHub credentials.
 -   [ ] PostgreSQL role has only intended attributes.
 -   [ ] PostgreSQL role has no unintended memberships.
 -   [ ] Baseline is owned/administered by `postgres`.

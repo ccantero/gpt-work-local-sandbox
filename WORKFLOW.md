@@ -1,27 +1,36 @@
 # ChatGPT Work workflow
 
 The infrastructure repository is a stable local control plane. Application
-projects are transferred through a shared handoff area into separate disposable
-Work workspaces; they are not developed inside the infrastructure checkout.
+projects are transferred from a human-owned repository through a handoff area
+into separate disposable Work workspaces; they are not developed inside the
+infrastructure checkout.
 
 ```text
-Human repository:                 /home/cristhian/git/<project>
-Shared handoff:                   /home/local-gpt-work/repos/
-Infrastructure checkout:         /home/local-gpt-work/git/gpt-work-local-sandbox/
-Disposable application workspace:/home/local-gpt-work/workspaces/<project>
+human-owned application repository
+  -> approved Git commit
+  -> git archive plus provenance
+  -> source handoff
+  -> disposable application workspace
+  -> independent one-commit Git repository with no remote
+  -> Work changes and tests
+  -> diff, patch, and report for human review
 ```
 
-The infrastructure checkout itself is the one exception to the snapshot
-model. The human maintains its authoritative development checkout and will
-publish reviewed commits through a normal GitHub repository. The isolated user
-may clone or pull that infrastructure repository. This does not grant
-`local-gpt-work` GitHub access to application repositories.
+The infrastructure checkout is the one exception to the archive model. This
+repository is public, so the restricted Work account may clone and pull it over
+public HTTPS without a GitHub token, SSH key, or human credentials. This
+control-plane access does not grant that account access to private application
+repositories; those continue to use the archive-and-provenance handoff below.
+
+Example paths use `<work-home>` for the restricted account's home and
+`<human-staging>` for a human-writable staging directory. On the validated
+installation, `<work-home>` is `/home/local-gpt-work`.
 
 ## Step 1: synchronize the human application repository
 
-As `cristhian`, synchronize and review the real application repository using
-the human's normal Git and GitHub credentials. Neither the infrastructure
-checkout nor `local-gpt-work` performs this synchronization.
+The human operator synchronizes and reviews the real application repository
+using the human's normal Git credentials. Neither the infrastructure checkout
+nor the restricted Work account performs this synchronization.
 
 ## Step 2: approve a source revision
 
@@ -35,15 +44,15 @@ Step 3 has two deliberately separate commands.
 
 ### 3A. Human-side handoff preparation
 
-As `cristhian`, export the approved revision into new paths in a
+As the human operator, export the approved revision into new paths in a
 human-writable staging directory:
 
 ```bash
 ./prepare-work-source.sh \
-  /home/cristhian/git/oferta-hunter \
+  /path/to/human-owned/application-repository \
   <full-approved-commit-id> \
-  /home/cristhian/work-handoff/oferta-hunter-<commit>.tar \
-  /home/cristhian/work-handoff/oferta-hunter-<commit>.provenance
+  <human-staging>/<project>-<commit>.tar \
+  <human-staging>/<project>-<commit>.provenance
 ```
 
 This command resolves the immutable commit, uses `git archive`, validates the
@@ -55,28 +64,26 @@ because they exist locally. Files intentionally tracked by the approved commit
 remain part of the approved snapshot.
 
 Both output paths must be absent. An existing artifact is never overwritten.
-After preparation, use the already-authorized human host procedure to place
-copies in `/home/local-gpt-work/repos/`, owned by `local-gpt-work`. With the
-verified `local-gpt-work:local-gpt-work 0755` directory, `cristhian` cannot
-normally create files there directly; this repository does not invent an ACL,
-shared group, or sudo rule to change that fact.
+After preparation, use an already-authorized host procedure to place copies in
+`<work-home>/repos/`, owned by the restricted account. This repository does not
+invent an ACL, shared group, or sudo rule for that transfer.
 
-`local-gpt-work` intentionally controls its own `repos/` directory and may
+The restricted account intentionally controls its handoff directory and may
 modify, replace, or delete artifacts there. Mode `0444`, provenance, and
 SHA-256 validation reduce accidental mistakes and detect an archive that no
 longer matches its paired metadata; they are not a security boundary against
-the isolated user.
+the artifact owner.
 
-### 3B. Isolated workspace initialization
+### 3B. Restricted workspace initialization
 
-As `local-gpt-work`, consume the prepared pair into a new application
-workspace:
+As the restricted Work account, consume the prepared pair into a new
+application workspace:
 
 ```bash
-/home/local-gpt-work/git/gpt-work-local-sandbox/initialize-work-workspace.sh \
-  /home/local-gpt-work/repos/oferta-hunter-<commit>.tar \
-  /home/local-gpt-work/repos/oferta-hunter-<commit>.provenance \
-  /home/local-gpt-work/workspaces/oferta-hunter
+<work-home>/git/gpt-work-local-sandbox/initialize-work-workspace.sh \
+  <work-home>/repos/<project>-<commit>.tar \
+  <work-home>/repos/<project>-<commit>.provenance \
+  <work-home>/workspaces/<project>
 ```
 
 This command validates provenance and archive SHA-256, extracts tracked source,
@@ -89,21 +96,30 @@ The target workspace must be absent. Even an empty existing directory is
 rejected because it may represent work needing review. Never delete or replace
 an existing workspace merely to make initialization proceed.
 
+### Completed validation
+
+The complete two-account Step 3 flow was validated on the reference host. An
+approved commit containing tracked `.gitignore` and `hello.txt` plus an ignored,
+untracked `.env` produced an archive containing only the tracked files and no
+`.git` directory. The restricted account then initialized a clean workspace
+with exactly one baseline commit, no remote, no `.env`, and provenance pointing
+to the approved upstream commit. A simulated Work edit changed only
+`hello.txt`; `git status --short` and `git diff` reported exactly that change.
+
 Before a future launcher starts Work, verify the workspace is clean, contains
 one commit, and has no remotes. Work's directory will be the application
-workspace—not the infrastructure checkout. A later launcher must combine
-infrastructure rules with the application's own `AGENTS.md`; that instruction
-composition and launching behavior are outside this step.
+workspace, not the infrastructure checkout. Instruction composition and
+launching behavior belong to Step 4 and remain outside this completed step.
 
 ## Step 4: run and review Work
 
 Not implemented here. Work will eventually run in the disposable application
 workspace. It must not clone, fetch, pull, push, or publish application projects
-to GitHub. Normal Git synchronization of the infrastructure checkout is a
+to GitHub. Normal synchronization of the public infrastructure checkout is a
 separate control-plane operation.
 
 ## Step 5: return review material to the human
 
 Not implemented here. Review diffs, patches, and reports will eventually return
-through the shared handoff area. The human decides what to apply and remains
-solely responsible for GitHub publication.
+through the handoff area. The human decides what to apply and remains solely
+responsible for publication.

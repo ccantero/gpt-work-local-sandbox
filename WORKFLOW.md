@@ -106,17 +106,37 @@ with exactly one baseline commit, no remote, no `.env`, and provenance pointing
 to the approved upstream commit. A simulated Work edit changed only
 `hello.txt`; `git status --short` and `git diff` reported exactly that change.
 
-Before a future launcher starts Work, verify the workspace is clean, contains
-one commit, and has no remotes. Work's directory will be the application
-workspace, not the infrastructure checkout. Instruction composition and
-launching behavior belong to Step 4 and remain outside this completed step.
+Before launching Work, verify the workspace is clean, contains one commit, and
+has no remotes. Work's directory will be the application workspace, not the
+infrastructure checkout.
 
 ## Step 4: run and review Work
 
-Not implemented here. Work will eventually run in the disposable application
-workspace. It must not clone, fetch, pull, push, or publish application projects
-to GitHub. Normal synchronization of the public infrastructure checkout is a
-separate control-plane operation.
+From a terminal inside the human Linux user's existing graphical login, supply
+the production VPS IPv4 address without recording it in the repository and run:
+
+```bash
+PROD_VPS_IP='<production-vps-ip>' \
+  <work-home>/git/gpt-work-local-sandbox/run-work.sh
+```
+
+The launcher is run by the human, not from a separate graphical login for
+`local-gpt-work`. It grants the restricted account access to the human's X
+display, checks or adds an owner-matched firewall reject rule for the supplied
+address, and uses `sudo -u local-gpt-work` to start the installed ChatGPT
+application with the restricted account's runtime and D-Bus paths. Cleanup
+revokes graphical access and removes the firewall rule only if this invocation
+added it.
+
+After ChatGPT opens, the human selects the initialized application workspace in
+ChatGPT Work. Workspace selection remains an explicit UI step; `run-work.sh`
+only starts the application. Work must not clone, fetch, pull, push, or publish
+application projects to GitHub. Normal synchronization of the public
+infrastructure checkout is a separate control-plane operation.
+
+The current launcher behavior is deliberately preserved. Better logging, sudo
+prompt handling, firewall lifecycle, and process shutdown behavior are known
+follow-up work rather than part of this launcher replacement.
 
 ## Step 5: return review material to the human
 

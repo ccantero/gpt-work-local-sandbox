@@ -839,6 +839,27 @@ sudoers                            valid
 
 ## 16. Routine operation
 
+### Launch ChatGPT Work
+
+The human starts Work from a terminal in their existing graphical Linux
+session; `local-gpt-work` does not need or use a separate graphical login.
+Provide the production VPS IPv4 address at invocation time without storing it
+in the repository:
+
+``` bash
+PROD_VPS_IP='<production-vps-ip>' \
+  /home/local-gpt-work/git/gpt-work-local-sandbox/run-work.sh
+```
+
+The launcher temporarily grants X access to `local-gpt-work`, ensures the
+owner-matched firewall reject rule exists, and switches users to start ChatGPT
+with the restricted account's runtime and D-Bus paths. Its cleanup revokes X
+access and removes the firewall rule only when that invocation added it.
+
+Logging, sudo prompt handling, firewall lifecycle, and process shutdown
+behavior remain known follow-up improvements. Do not redesign those behaviors
+during routine setup or operation.
+
 ### Development
 
 Work only against:

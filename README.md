@@ -125,6 +125,26 @@ privileged helpers, host configuration, and narrow sudo policy.
 
 ## Routine development and work reset
 
+From a terminal in the human Linux user's existing graphical session, provide
+the production VPS IPv4 address through the environment and start the launcher:
+
+```bash
+PROD_VPS_IP='<production-vps-ip>' ./run-work.sh
+```
+
+The address is an operator-supplied host value and must not be committed. The
+launcher grants `local-gpt-work` access to the human's X display, obtains that
+account's UID, and ensures an owner-matched `iptables` reject rule exists for
+the supplied address. It then switches to `local-gpt-work`, supplies that
+account's runtime and D-Bus paths, and starts `/usr/bin/chatgpt` in X11 mode.
+On exit or a handled signal it removes the graphical grant and removes the
+firewall rule only when this invocation added it. Workspace selection remains
+an explicit step in ChatGPT Work.
+
+This launcher intentionally preserves the already working host behavior. Its
+logging, sudo prompt handling, firewall lifecycle, and process shutdown
+behavior are known follow-up improvements and are not redesigned here.
+
 Connect only to the disposable work database:
 
 ```bash
@@ -261,6 +281,8 @@ must have the same protected access posture as baseline.
 ## Repository contents
 
 - `WORKFLOW.md`: human-to-Work source preparation and review workflow.
+- `run-work.sh`: human-session launcher that grants graphical access, manages
+  the scoped firewall rule, switches to `local-gpt-work`, and starts ChatGPT.
 - `prepare-work-source.sh`: human-side deterministic tracked-source handoff
   creation.
 - `initialize-work-workspace.sh`: isolated-user handoff verification and

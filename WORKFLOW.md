@@ -13,7 +13,9 @@ human-owned application repository
   -> disposable application workspace
   -> independent one-commit Git repository with no remote
   -> Work changes and tests
-  -> diff, patch, and report for human review
+  -> patch and report outside the application repository
+  -> human verification, application, review, and testing
+  -> independent human commit, if accepted
 ```
 
 The infrastructure checkout is the one exception to the archive model. This
@@ -98,13 +100,10 @@ an existing workspace merely to make initialization proceed.
 
 ### Completed validation
 
-The complete two-account Step 3 flow was validated on the reference host. An
-approved commit containing tracked `.gitignore` and `hello.txt` plus an ignored,
-untracked `.env` produced an archive containing only the tracked files and no
-`.git` directory. The restricted account then initialized a clean workspace
-with exactly one baseline commit, no remote, no `.env`, and provenance pointing
-to the approved upstream commit. A simulated Work edit changed only
-`hello.txt`; `git status --short` and `git diff` reported exactly that change.
+The complete two-account source preparation and workspace initialization flow
+was validated on the reference host. The resulting workspace contained only
+approved tracked source, had a clean independent baseline commit and no remote,
+and excluded repository metadata and untracked or ignored source-tree files.
 
 Before launching Work, verify the workspace is clean, contains one commit, and
 has no remotes. Work's directory will be the application workspace, not the
@@ -140,6 +139,41 @@ follow-up work rather than part of this launcher replacement.
 
 ## Step 5: return review material to the human
 
-Not implemented here. Review diffs, patches, and reports will eventually return
-through the handoff area. The human decides what to apply and remains solely
-responsible for publication.
+Work may implement changes, run tests, and create multiple local commits inside
+the disposable workspace. At the end, it writes its implementation report and
+patch outside the application repository, preferably under
+`<work-home>/deliverables`, so review artifacts cannot accidentally enter an
+application commit. The patch must represent the complete difference between
+the initialized Work baseline and final `HEAD`, not merely the last Work
+commit. Record its SHA-256 before transfer.
+
+The human copies the report and patch to a human-owned review location, verifies
+the recorded checksum, and checks the patch against the approved original
+application repository before changing it:
+
+```bash
+sha256sum /path/to/WORK_CHANGES.patch
+git -C /path/to/human-owned/application-repository apply --check \
+  /path/to/WORK_CHANGES.patch
+```
+
+If those checks succeed, the human applies the patch, inspects the actual diff,
+runs the relevant test suite, and decides whether to create a new human-side
+commit. Work's internal commits and the human repository have independent
+histories, so Work commit hashes must not be used for Git operations in the
+human repository. The patch is the supported integration mechanism. Direct
+human Git access to the Work workspace is unnecessary; do not add
+`safe.directory`, change workspace ownership, or create shared Git access for
+this purpose.
+
+### Completed E2E validation
+
+The complete application handoff, isolated implementation, patch return, and
+human review and integration workflow was successfully validated end to end.
+The validation confirmed that application development requires neither a
+remote nor GitHub credentials in the Work repository and that the patch is a
+sufficient boundary between the independent Work and human Git histories.
+
+The preferred future output directory, `/home/local-gpt-work/deliverables`,
+was created after this run with owner `local-gpt-work` and mode `0755`. Its use
+has therefore been prepared but not yet validated end to end.

@@ -174,13 +174,18 @@ VM.
 
 ### Infrastructure checkout and application directories
 
-The validated reference installation has these directories:
+The current reference installation has these directories:
 
 ``` text
 /home/local-gpt-work/git/gpt-work-local-sandbox
 /home/local-gpt-work/repos
 /home/local-gpt-work/workspaces
+/home/local-gpt-work/deliverables
 ```
+
+The application handoff and workspace workflow has been validated using the
+first three paths. The `deliverables/` path was prepared later and is addressed
+separately below.
 
 The first is the restricted runtime checkout of this infrastructure
 repository. The repository is public: reviewed infrastructure changes follow
@@ -190,10 +195,11 @@ this synchronization. This control-plane exception applies only to the
 infrastructure repository; application repositories continue to use approved
 archives and provenance.
 
-`repos/` receives prepared application source/provenance and, in a future
-workflow, returned review artifacts. `workspaces/` contains disposable
-application workspaces initialized from those snapshots. On the reference host
-both directories were created and verified as:
+`repos/` receives prepared application source/provenance. `workspaces/`
+contains disposable application workspaces initialized from those snapshots.
+`deliverables/` is the intended stable location for reports and patches kept
+outside application repositories. On the reference host `repos/` and
+`workspaces/` were created and verified as:
 
 ``` text
 owner: local-gpt-work
@@ -201,19 +207,21 @@ group: local-gpt-work
 mode:  0755
 ```
 
-For a new host, an authorized human administrator may create those two exact
+For a new host, an authorized human administrator may create those three exact
 directories after the account exists, using the host's normal administrative
 procedure, then verify them:
 
 ``` bash
 stat -c '%U:%G %a %n' \
   /home/local-gpt-work/repos \
-  /home/local-gpt-work/workspaces
+  /home/local-gpt-work/workspaces \
+  /home/local-gpt-work/deliverables
 ```
 
 Do not move them to `/srv`, add a shared group or ACL, or create another sudo
 boundary for source transfer. `local-gpt-work` intentionally controls both
-directories, including the ability to modify or remove its handoff artifacts.
+source and workspace directories and the deliverables directory, including the
+ability to modify or remove artifacts in them.
 Archive SHA-256/provenance checks remain useful for integrity and deterministic
 pairing, but do not protect artifacts from their owner.
 
@@ -223,20 +231,16 @@ human-writable staging location and use the already-authorized host procedure
 to place copies in `repos/` with `local-gpt-work` ownership. This repository
 does not define a new privilege mechanism for that transfer.
 
-The human-side preparation command has been exercised on the real host with a
-disposable Git repository. Its approved commit contained tracked `.gitignore`
-and `hello.txt` plus an ignored, untracked `.env`. The resulting mode-`0444`
-archive and provenance were created successfully; the archive contained the
-two tracked files and contained neither `.env` nor upstream `.git`. Copies were
-then placed in `repos/` with `local-gpt-work` ownership.
-
-The complete Step 3 flow was subsequently validated on the real host. As the
-restricted account, `initialize-work-workspace.sh` created a clean independent
-repository with exactly one baseline commit, no remote, the approved upstream
-commit in the baseline message, both tracked files present, and the ignored
-`.env` absent. A simulated Work edit produced only the expected `hello.txt`
-status and diff. Step 3 therefore has no pending real-host initialization check;
+The complete source preparation and workspace initialization flow was validated
+on the reference host. It produced a verified source snapshot and a clean,
+independent one-commit workspace with no remote, containing only the approved
+tracked source. Step 3 therefore has no pending real-host initialization check;
 see `WORKFLOW.md` for the concise validation record.
+
+The `deliverables/` directory was created later as
+`local-gpt-work:local-gpt-work` mode `0755`. It was prepared after the
+successful E2E validation, so its future use has not yet been validated by
+another E2E run.
 
 ------------------------------------------------------------------------
 
@@ -839,6 +843,35 @@ sudoers                            valid
 
 ## 16. Routine operation
 
+### Application source, implementation, and integration
+
+For each application task:
+
+1.  The human selects an approved commit and runs `prepare-work-source.sh` to
+    create a new archive and provenance pair in human-writable staging.
+2.  Using the already-authorized host transfer procedure, place copies in
+    `/home/local-gpt-work/repos` with restricted-account ownership.
+3.  As `local-gpt-work`, run `initialize-work-workspace.sh` with that pair and
+    a new path under `/home/local-gpt-work/workspaces`. Verify a clean
+    one-commit repository with no remote.
+4.  Launch ChatGPT Work and explicitly select that application workspace. Work
+    may edit, test, and make local commits without GitHub credentials.
+5.  Have Work write a self-contained implementation report and a patch covering
+    the complete baseline-to-final-`HEAD` difference outside the application
+    repository. Record the patch SHA-256. The intended future location is
+    `/home/local-gpt-work/deliverables`; it is prepared but has not yet been
+    exercised in an E2E run.
+6.  Copy the deliverables to a human-owned review directory. The human verifies
+    the SHA-256, runs `git apply --check` against the original repository,
+    applies the patch, inspects the actual diff, and runs the relevant tests.
+7.  If accepted, the human creates an independent commit in the original
+    repository and alone decides whether to publish it.
+
+Do not use Work's internal commit hashes in the human repository. Do not make
+the Work workspace a shared repository, change its ownership, or add
+`safe.directory`; the patch is the supported integration boundary. See
+`WORKFLOW.md` for the validated workflow and detailed rationale.
+
 ### Launch ChatGPT Work
 
 The human starts Work from a terminal in their existing graphical Linux
@@ -948,6 +981,9 @@ answer all of these with evidence:
     mode `0755`.
 -   [ ] `/home/local-gpt-work/workspaces` is
     `local-gpt-work:local-gpt-work` mode `0755`.
+-   [ ] `/home/local-gpt-work/deliverables` is
+    `local-gpt-work:local-gpt-work` mode `0755` (prepared on the reference host;
+    use in a new E2E run remains unvalidated).
 -   [ ] Public-HTTPS infrastructure Git distribution is distinct from
     application source handoff and requires no GitHub credentials.
 -   [ ] PostgreSQL role has only intended attributes.

@@ -123,6 +123,33 @@ security boundary. The protected boundaries remain the human repositories and
 credentials, production credentials and dumps, PostgreSQL baseline, installed
 privileged helpers, host configuration, and narrow sudo policy.
 
+Work may edit and test freely in an application workspace, make one or more
+local commits, and generate review material. Those commits belong to Work's
+independent repository history: their hashes are not revisions the human can
+use in the original application repository. The supported return path is a
+patch representing the complete change from the Work baseline to Work's final
+`HEAD`, accompanied by a self-contained implementation report. The human
+verifies and applies the patch, reviews and tests the resulting change, and
+then decides whether to commit or publish it from the human-owned repository.
+Shared Git access to a Work workspace is neither required nor supported; do
+not change workspace ownership or add `safe.directory` merely to make that
+repository usable by the human account.
+
+## Validated application round trip
+
+The complete application workflow has been validated end to end: approved
+source was handed off, verified, and initialized as an isolated repository;
+Work implemented and tested a change without a remote or GitHub credentials;
+and the human verified, applied, reviewed, and tested the resulting patch in
+the original repository before independently committing it.
+
+The stable return location prepared for future runs is
+`/home/local-gpt-work/deliverables`, owned by `local-gpt-work` with mode `0755`.
+It was prepared after the successful validation and has not yet been validated
+as part of a subsequent round trip. Review artifacts should remain outside the
+application Git repository so they cannot accidentally enter application
+commits.
+
 ## Routine development and work reset
 
 From a terminal in the human Linux user's existing graphical session, provide

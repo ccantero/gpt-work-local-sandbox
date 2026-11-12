@@ -192,77 +192,20 @@ drop/recreate only work and reads baseline only as the fixed clone source. Reset
 is destructive to work and may terminate work connections. It has no refresh
 mode and no baseline mutation command.
 
-## Dumps and snapshots
+## Database refresh
 
-`do_snapshot.sh <postgres-service>` creates a timestamped custom-format dump in
-`snapshots/`. It accepts a conservative service name, sets a private umask,
-requires an existing snapshot directory to be owned by the current user with
-mode `0700`, and creates new dumps as `0600` without overwriting a final path.
-It deliberately refuses to repair an unsafe existing directory; a human must
-inspect and correct existing permissions separately.
+The human operator runs `./db_refresh --full` to acquire and restore a fresh
+approved snapshot, or `./db_refresh --restore-only` to retry with a verified
+local archive. The tool stores snapshots and checksums in private storage
+outside Git and Work. See the [database runbook](RUNBOOK.md) for commands,
+detached execution, and recovery. Launch Work separately with `run-work.sh`.
 
-Dumps may contain production data. They must not be committed, and the
-repository ignores `snapshots/` and common dump suffixes. Confirm that a dump
-is approved and trusted before refresh; restoring it executes schema
-definitions as the application role.
-
-## Protected baseline refresh
-
-Never run `refresh_baseline.sh` from the repository with privilege. After a
-reviewed version has been deliberately installed, the human administrator
-invokes only the protected copy as the `postgres` OS user:
-
-```bash
-sudo -u postgres /usr/local/sbin/refresh-binancebot-baseline \
-  /absolute/path/to/approved.dump
-```
-
-The installed refresh source does not call `sudo`, acquire credentials, or keep
-sudo credentials alive. It rejects another OS identity, pins the local
-endpoint, copies the regular non-symlink input once to a private temporary file,
-and validates, hashes, and restores only that copy.
-
-The refresh workflow preserves the candidate/promotion safety state machine:
-
-1. validate and hash the protected dump copy;
-2. require baseline and refuse to overwrite an existing candidate or previous;
-3. check capacity, create an inaccessible candidate, and restore under
-   `SET ROLE local-gpt-work` while ignoring archive owners and ACLs;
-4. write the completed-restore digest marker, validate object ownership and
-   presence, and remove temporary create privileges;
-5. rename old baseline to previous and promote candidate;
-6. validate promoted baseline, invoke the separately installed reset helper,
-   and validate rebuilt work; and
-7. remove previous only after every validation succeeds.
-
-No application anchor tables are contractual yet. `bot.event_log`,
-`bot.portfolio`, `bot.trades`, and `django.django_migrations` remain candidates
-requiring a human decision. Current object-presence checks must not be
-represented as stronger application-level validation.
-
-### Resume and recovery
-
-Resume applies only when restore completed, its marker was written, a later
-candidate-stage step failed, and the database is still named candidate:
-
-```bash
-sudo -u postgres /usr/local/sbin/refresh-binancebot-baseline \
-  --resume /absolute/path/to/the-same-approved.dump
-```
-
-Every invocation, including `--resume`, creates a new protected temporary copy
-from the supplied original dump. Resume does not reuse protected temporary bytes
-from the earlier execution. It is valid only if the supplied original is still
-byte-for-byte identical to the dump used for the completed restore, as proven
-by the new copy's SHA-256 matching the candidate marker. Do not resume a
-failed/partial restore, use a changed or different dump, or resume after
-promotion.
-
-The helper refuses to overwrite candidate or previous state. A promotion
-rename failure attempts to restore the old baseline name. Any failure after
-promotion preserves previous; work may be absent because it is disposable and
-reset is drop-then-create. Preserve ambiguous state and escalate rather than
-deleting it.
+The reviewed installed helper restores a protected candidate under
+`local-gpt-work` while ignoring archive owners and ACLs. It promotes the
+validated candidate transactionally, keeps the previous baseline through Work
+reset and verification, and uses checksum markers to recover interrupted
+runs. The validation checks PostgreSQL ownership, privileges, and application
+relation presence. Application acceptance remains an operator responsibility.
 
 ## Human-only installation and configuration
 
@@ -316,4 +259,10 @@ must have the same protected access posture as baseline.
   independent Work repository creation.
 - `refresh_baseline.sh`: source for protected baseline refresh.
 - `reset-binancebot-work`: source for narrow work reset.
-- `do_snapshot.sh`: private custom-format snapshot creation.
+- `db_refresh`: human-only unattended snapshot acquisition and restore.
+- `prepare-codex-env`: database workflow support and optional workspace preparation.
+- `prepare-work-workspace.sh`: direct preparation from an approved Git commit.
+
+Run the non-privileged database workflow tests with
+`python3 tests/test-prepare-codex-env.py`. Run `tests/test-refresh-baseline.sh`
+for a disposable PostgreSQL 17 fixture that needs a private Unix socket.

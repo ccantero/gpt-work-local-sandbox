@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 umask 077
+export PATH=/usr/bin:/bin
+for variable in ${!PG@}; do unset "$variable"; done
+export PGCONNECT_TIMEOUT=5
 
 if (( $# != 0 )); then
     echo "Usage: $0" >&2
@@ -10,61 +13,40 @@ fi
 readonly PG_BIN="/usr/lib/postgresql/17/bin"
 readonly PG_SOCKET="/var/run/postgresql"
 readonly PG_PORT="5432"
-readonly PG_ADMIN="postgres"
 readonly BASELINE="binancebot_work_baseline"
 readonly WORK_DB="binancebot_work"
 readonly WORK_OWNER="local-gpt-work"
 
-# Do not allow libpq environment state to redirect this privileged helper.
-unset PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT PGDATABASE
-unset PGHOST PGHOSTADDR PGOPTIONS PGPASSFILE PGPASSWORD PGPORT PGREQUIREAUTH
-unset PGSERVICE PGSERVICEFILE PGSSLCERT PGSSLCRL PGSSLKEY PGSSLMODE
-unset PGSSLROOTCERT PGSSLSNI PGTARGETSESSIONATTRS PGUSER
-
-RUN_AS=""
-if ! RUN_AS="$(/usr/bin/id -un)"; then
-    echo "ERROR: could not determine execution identity" >&2
-    exit 69
-fi
-if [[ "${RUN_AS}" != "postgres" ]]; then
+if [[ $(/usr/bin/id -un) != postgres ]]; then
     echo "ERROR: reset must run as the postgres OS user" >&2
     exit 69
 fi
 
-BASELINE_EXISTS=""
-if ! BASELINE_EXISTS="$(
-    "${PG_BIN}/psql" -X \
-        --host="${PG_SOCKET}" \
-        --port="${PG_PORT}" \
-        --username="${PG_ADMIN}" \
-        --no-password \
-        --dbname=postgres \
-        -Atqc "SELECT count(*) FROM pg_database WHERE datname='${BASELINE}'"
-)"; then
-    echo "ERROR: could not verify baseline; work was not modified" >&2
-    exit 69
-fi
-if [[ "${BASELINE_EXISTS}" != "1" ]]; then
-    echo "ERROR: baseline database does not exist: ${BASELINE}" >&2
-    echo "Work was not modified." >&2
-    exit 69
+connection=(-h "$PG_SOCKET" -p "$PG_PORT" -U postgres -w)
+admin() {
+    "$PG_BIN/psql" -X "${connection[@]}" -d postgres -v ON_ERROR_STOP=1 -At "$@"
+}
+
+data_dir=$(admin -c "SHOW data_directory")
+[[ -d $data_dir ]] || exit 69
+exec 8>"$data_dir/.binancebot-reset.lock"
+if ! flock -n 8; then
+    echo "ERROR: another Work reset is running" >&2
+    exit 75
 fi
 
-"${PG_BIN}/dropdb" \
-    --host="${PG_SOCKET}" \
-    --port="${PG_PORT}" \
-    --username="${PG_ADMIN}" \
-    --no-password \
-    --if-exists \
-    --force \
-    "${WORK_DB}"
+safe=$(admin -c "
+    SELECT d.datdba = 'postgres'::regrole AND d.datconnlimit = 0
+       AND NOT has_database_privilege('$WORK_OWNER', d.oid, 'CONNECT')
+       AND NOT has_database_privilege('$WORK_OWNER', d.oid, 'CREATE')
+       AND NOT EXISTS (SELECT FROM pg_database w WHERE w.datname='$WORK_DB'
+                       AND pg_get_userbyid(w.datdba) <> '$WORK_OWNER')
+      FROM pg_database d WHERE d.datname='$BASELINE'")
+if [[ $safe != t ]]; then
+    echo "ERROR: baseline absent or protection/ownership checks failed; Work was not modified" >&2
+    exit 78
+fi
 
-"${PG_BIN}/createdb" \
-    --host="${PG_SOCKET}" \
-    --port="${PG_PORT}" \
-    --username="${PG_ADMIN}" \
-    --no-password \
-    --strategy=file_copy \
-    --template="${BASELINE}" \
-    --owner="${WORK_OWNER}" \
-    "${WORK_DB}"
+"$PG_BIN/dropdb" "${connection[@]}" --if-exists --force "$WORK_DB"
+"$PG_BIN/createdb" "${connection[@]}" --strategy=file_copy \
+    --template="$BASELINE" --owner="$WORK_OWNER" "$WORK_DB"

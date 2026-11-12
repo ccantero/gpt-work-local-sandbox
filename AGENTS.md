@@ -16,6 +16,9 @@ guidance.
   into a baseline-administration command.
 - Do not access production credentials or production systems unless the human
   explicitly authorizes it.
+- `db_refresh` and its archive store are human-only. Implement and test the
+  workflow with synthetic data. Only an explicitly authorized human
+  `--full` may access the production service.
 - Work must not obtain, receive, copy, or retain production-derived dumps.
   Production-derived dumps must remain human-controlled and outside the
   restricted Work account and workspace.

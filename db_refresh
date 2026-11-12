@@ -1,0 +1,30 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+    echo "Usage: ./db_refresh {--full|--restore-only} [--dump-dir DIR] [--jobs N]"
+    echo "                    [--estimate-bytes N] [--reserve-bytes N]"
+}
+
+case "${1:-}" in
+    --full) mode=--refresh ;;
+    --restore-only) mode=--reuse-latest ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 64 ;;
+esac
+shift
+
+options=()
+while (( $# )); do
+    case "$1" in
+        --dump-dir|--jobs|--estimate-bytes|--reserve-bytes)
+            if (( $# < 2 )); then usage >&2; exit 64; fi
+            options+=("$1=$2")
+            shift 2
+            ;;
+        *) usage >&2; exit 64 ;;
+    esac
+done
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd -P)"
+exec "$root/prepare-codex-env" "$mode" "${options[@]}"

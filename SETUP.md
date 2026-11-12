@@ -26,6 +26,71 @@ and resolve the discrepancy before continuing.
 
 ------------------------------------------------------------------------
 
+## Install the reviewed BinanceBot helpers
+
+The human preparation command requires Ubuntu with Python 3.11 or newer,
+PostgreSQL 17 server and clients, Bash, GNU coreutils, `flock` and the
+existing reference accounts. Workspace and launch operations additionally
+use Git, tar, X11, ChatGPT and the existing `iptables` policy.
+
+`db_refresh` uses the reviewed helper versions below. Verify that the
+existing human noninteractive authorization and the approved read-only
+`vpsdatabase` login work in the intended detached session. See the
+[database runbook](RUNBOOK.md#unattended-postgresql-dump-and-restore).
+
+From the human-controlled checkout, run the tests in [README.md](README.md).
+Review both helper diffs and preserve the currently installed versions in
+administrator-controlled storage before replacing them. The human
+administrator installs the reviewed sources and verifies the bytes:
+
+```bash
+sudo install -o root -g root -m 0755 ./reset-binancebot-work \
+  /usr/local/sbin/reset-binancebot-work
+sudo install -o root -g root -m 0755 ./refresh_baseline.sh \
+  /usr/local/sbin/refresh-binancebot-baseline
+sha256sum ./reset-binancebot-work /usr/local/sbin/reset-binancebot-work
+sha256sum ./refresh_baseline.sh /usr/local/sbin/refresh-binancebot-baseline
+```
+
+Verify ownership, modes and ACLs on both installed files and their parent
+directories. Work's only allowed sudo command remains the installed reset
+helper as `postgres` with exact empty arguments. Keep the refresh helper
+and other administrative commands restricted to the human operator.
+
+The operator uses `sudo -n` for local catalog inspection as `postgres`,
+verification as `local-gpt-work`, and the requested helper. Workspace
+creation uses the existing human user-switch permission. The separate
+graphical launcher uses the existing X11 and firewall permissions.
+Validate the approved human database policy from the
+intended unattended session. A terminal-bound authentication cache may not
+carry into a detached command. Have the administrator review the exact
+human-only operations if noninteractive authorization fails. The command
+does not install sudo rules. Keep sudo input recording disabled for the
+reviewed archive stream because it carries confidential data.
+
+As the human operator, create the private snapshot store outside Git and Work:
+
+```bash
+mkdir -m 0700 "$HOME/binancebot-snapshots"
+./prepare-codex-env --status
+```
+
+Provide the existing approved `vpsdatabase` libpq service and unattended
+authentication in the human account for `--refresh`. Use the site's
+approved credential store and verify the source identity out of band. The
+database size query and dump require the role's existing read permissions.
+Verify the live PostgreSQL connection policy, including peer access for Work
+to `binancebot_work`, protection of the baseline, and restrictions on
+connections to unrelated databases. The tool validates the four fixed names
+and does not exercise unrelated databases. Capacity checks require the human
+to be able to stat the PostgreSQL data directory and filesystem.
+
+The disposable PostgreSQL fixture exercises the helper sources. Live sudo
+authorization, host firewall state, GUI startup, and production service access
+require separate human verification. During rollback, stop automated runs,
+inspect the four fixed database names, and resolve any in-progress v2 refresh
+before reinstalling older reviewed helper bytes.
+
 ## 1. Target architecture
 
 The design deliberately separates two PostgreSQL databases and two
@@ -355,41 +420,9 @@ should not already exist.
 
 ## 7. Prepare snapshots safely
 
-Repository snapshots may contain production data and must never be
-committed.
-
-Create the directory as the human user:
-
-``` bash
-mkdir -p snapshots
-chmod 0700 snapshots
-```
-
-Verify:
-
-``` bash
-stat -c '%U:%G %a %n' snapshots
-```
-
-Expected:
-
-``` text
-<your-human-user>:<your-human-group> 700 snapshots
-```
-
-`do_snapshot.sh` is designed to create custom-format dumps privately and
-to refuse an unsafe existing snapshot directory rather than silently
-repair it.
-
-After creating or importing an approved dump:
-
-``` bash
-chmod 0600 snapshots/*.dump
-find snapshots -maxdepth 1 -type f -name '*.dump' \
-  -exec stat -c '%U:%G %a %n' {} \;
-```
-
-Never commit dumps. Treat every production-derived dump as sensitive.
+Create the human-owned snapshot directory outside Git and Work with mode
+`0700`. Keep approved archives mode `0600`. See the
+[database runbook](RUNBOOK.md) for acquisition, verification, and reuse.
 
 ------------------------------------------------------------------------
 
@@ -614,8 +647,7 @@ Safe identity rejection test:
 Expected:
 
 ``` text
-ERROR: baseline refresh must run as the postgres OS user
-Run the protected installed helper; never elevate the repository source.
+Run only the protected installed helper as the postgres OS user.
 ```
 
 Safe argument validation test:
@@ -638,7 +670,7 @@ sudo -u postgres \
 Expected:
 
 ``` text
-ERROR: snapshot must be a regular, non-symlink file: /tmp/THIS-SNAPSHOT-DOES-NOT-EXIST.dump
+Use a regular, non-symlink dump.
 ```
 
 Do not perform a real baseline refresh merely to test installation.
@@ -678,75 +710,10 @@ sudo visudo -c
 
 ## 14. First real baseline refresh
 
-Do this only when there is an approved dump that should actually become
-the baseline.
-
-Before starting:
-
-``` bash
-df -h /
-
-sudo -u postgres psql -X -d postgres -Atqc "
-SELECT datname,
-       pg_get_userbyid(datdba),
-       pg_size_pretty(pg_database_size(datname))
-FROM pg_database
-WHERE datname IN (
-  'binancebot_work',
-  'binancebot_work_baseline',
-  'binancebot_work_baseline_candidate',
-  'binancebot_work_baseline_previous'
-)
-ORDER BY datname;
-"
-```
-
-The refresh helper performs its own capacity check. It requires
-approximately the current baseline size plus a 25% safety margin before
-creating the candidate.
-
-Run only the protected installed helper:
-
-``` bash
-sudo -u postgres /usr/local/sbin/refresh-binancebot-baseline \
-  /absolute/path/to/approved.dump
-```
-
-The workflow is intentionally staged:
-
-1.  copy the supplied regular non-symlink dump into protected temporary
-    storage;
-2.  validate and hash that protected copy;
-3.  require baseline and refuse ambiguous candidate/previous state;
-4.  check free capacity;
-5.  create a protected candidate;
-6.  restore under `SET ROLE local-gpt-work` while ignoring archive
-    owner/ACL;
-7.  validate candidate object presence and ownership;
-8.  revoke temporary create privileges;
-9.  rename baseline → previous;
-10. rename candidate → baseline;
-11. validate the promoted baseline;
-12. invoke the separately installed reset helper;
-13. validate work;
-14. remove previous only after success.
-
-A failed or ambiguous refresh is **not** a reason to manually delete
-candidate or previous. Preserve recovery state and investigate.
-
-### Resume
-
-`--resume` is narrowly defined. Use it only when restore completed, the
-completed-restore marker exists, a later candidate-stage step failed,
-and the database is still named candidate.
-
-``` bash
-sudo -u postgres /usr/local/sbin/refresh-binancebot-baseline \
-  --resume /absolute/path/to/the-same-approved.dump
-```
-
-The dump must be byte-for-byte identical to the one used for the
-completed restore.
+Follow [the database runbook](RUNBOOK.md) after completing the reviewed helper
+installation and verifying the human sudo policy. Stop Work and application
+writers. The refresh tool reports the database state, estimates capacity, and
+validates the promoted baseline and disposable Work database.
 
 ------------------------------------------------------------------------
 
@@ -913,14 +880,8 @@ This destroys and recreates work from baseline.
 
 ### Refresh baseline
 
-Human administrator only:
-
-``` bash
-sudo -u postgres /usr/local/sbin/refresh-binancebot-baseline \
-  /absolute/path/to/approved.dump
-```
-
-A successful refresh also resets work from the newly promoted baseline.
+Human administrator only. Follow [the database runbook](RUNBOOK.md).
+A successful refresh also resets Work from the promoted baseline.
 
 ------------------------------------------------------------------------
 

@@ -1,541 +1,262 @@
 #!/bin/bash
 set -euo pipefail
 umask 077
+export PATH=/usr/bin:/bin
+for variable in ${!PG@}; do unset "$variable"; done
+export PGCONNECT_TIMEOUT=5
 
 readonly PG_BIN="/usr/lib/postgresql/17/bin"
 readonly PG_SOCKET="/var/run/postgresql"
 readonly PG_PORT="5432"
-readonly PG_ADMIN="postgres"
-
-# Do not allow libpq environment state to redirect this privileged helper.
-unset PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT PGDATABASE
-unset PGHOST PGHOSTADDR PGOPTIONS PGPASSFILE PGPASSWORD PGPORT PGREQUIREAUTH
-unset PGSERVICE PGSERVICEFILE PGSSLCERT PGSSLCRL PGSSLKEY PGSSLMODE
-unset PGSSLROOTCERT PGSSLSNI PGTARGETSESSIONATTRS PGUSER
-
-RUN_AS=""
-if ! RUN_AS="$(/usr/bin/id -un)"; then
-    echo "ERROR: could not determine execution identity" >&2
-    exit 69
-fi
-if [[ "${RUN_AS}" != "postgres" ]]; then
-    echo "ERROR: baseline refresh must run as the postgres OS user" >&2
-    echo "Run the protected installed helper; never elevate the repository source." >&2
-    exit 69
-fi
-
-psql_admin() {
-    "${PG_BIN}/psql" -X \
-        --host="${PG_SOCKET}" \
-        --port="${PG_PORT}" \
-        --username="${PG_ADMIN}" \
-        --no-password \
-        "$@"
-}
-
-require_nonnegative_integer() {
-    local value="$1"
-    local label="$2"
-    if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: ${label} was not a non-negative integer" >&2
-        exit 90
-    fi
-}
-
-RESUME=false
-if [[ "${1:-}" == "--resume" ]]; then
-    RESUME=true
-    shift
-fi
-
-if (( $# != 1 )); then
-    echo "Usage: $0 [--resume] <snapshot.dump>" >&2
-    exit 64
-fi
-
-readonly SNAPSHOT_INPUT="$1"
-readonly CANDIDATE="binancebot_work_baseline_candidate"
 readonly BASELINE="binancebot_work_baseline"
+readonly CANDIDATE="binancebot_work_baseline_candidate"
 readonly PREVIOUS="binancebot_work_baseline_previous"
-readonly WORK_OWNER="local-gpt-work"
+readonly WORK="binancebot_work"
+readonly OWNER="local-gpt-work"
+readonly RESET="/usr/local/sbin/reset-binancebot-work"
+readonly SPOOL="/var/tmp/binancebot-refresh-v2"
 
-if [[ ! -f "${SNAPSHOT_INPUT}" || -L "${SNAPSHOT_INPUT}" ]]; then
-    echo "ERROR: snapshot must be a regular, non-symlink file: ${SNAPSHOT_INPUT}" >&2
-    exit 66
+log() { printf '[%(%FT%T%z)T] refresh: %s\n' -1 "$*"; }
+fail() { log "$2" >&2; exit "$1"; }
+psql_local() {
+    "$PG_BIN/psql" -X -w -h "$PG_SOCKET" -p "$PG_PORT" -U postgres \
+        -v ON_ERROR_STOP=1 -At "$@"
+}
+admin() { psql_local -d postgres "$@"; }
+db_marker() {
+    admin -c "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname='$1'"
+}
+db_exists() {
+    local count
+    count=$(admin -c "SELECT count(*) FROM pg_database WHERE datname='$1'") ||
+        fail 69 "Cannot inspect local PostgreSQL database state."
+    [[ $count == 1 ]]
+}
+protected() {
+    [[ $(admin -c "
+        SELECT datdba = 'postgres'::regrole AND datconnlimit = 0
+           AND NOT has_database_privilege('$OWNER', oid, 'CONNECT')
+           AND ('$2' = 'restoring' OR NOT has_database_privilege('$OWNER', oid, 'CREATE'))
+          FROM pg_database WHERE datname='$1'") == t ]]
+}
+idle() {
+    [[ $(admin -c "SELECT count(*) FROM pg_stat_activity WHERE datname='$1'") == 0 ]] ||
+        fail 75 "Stop sessions on $1 before retrying."
+}
+objects_ok() {
+    [[ $(psql_local -d "$1" -c "
+        SELECT count(*) > 0 AND bool_and(pg_get_userbyid(c.relowner) = '$OWNER')
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname IN ('bot', 'django') AND c.relkind IN ('r','p','S','v','m','f')") == t ]]
+}
+work_ok() {
+    [[ $(admin -c "
+        SELECT pg_get_userbyid(datdba) = '$OWNER' AND datallowconn AND datconnlimit <> 0
+           AND has_database_privilege('$OWNER', oid, 'CONNECT')
+          FROM pg_database WHERE datname='$WORK'") == t ]] &&
+        objects_ok "$WORK"
+}
+
+[[ $(/usr/bin/id -un) == postgres ]] ||
+    fail 69 "Run only the protected installed helper as the postgres OS user."
+jobs=1
+expected=""
+resume=false
+while (( $# > 0 )); do
+    case "$1" in
+        --jobs) (( $# >= 2 )) || fail 64 "Missing job count."; jobs="$2"; shift 2 ;;
+        --sha256) (( $# >= 2 )) || fail 64 "Missing checksum."; expected="$2"; shift 2 ;;
+        --resume) resume=true; shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+(( $# == 1 )) && [[ $jobs =~ ^[1-8]$ ]] &&
+    [[ -z $expected || $expected =~ ^[0-9a-f]{64}$ ]] ||
+    fail 64 "Usage: refresh-binancebot-baseline [--jobs 1-8] [--sha256 SHA256] [--resume] {--stdin|PATH}"
+input="$1"
+if [[ $input != --stdin ]]; then
+    [[ -f $input && ! -L $input ]] || fail 66 "Use a regular, non-symlink dump."
 fi
 
-# Every invocation, including --resume, stages a new protected copy. Resume is
-# accepted only when that copy hashes to the completed-restore marker, proving
-# the supplied original dump is byte-for-byte identical to the restored dump.
-SNAPSHOT=""
-if ! SNAPSHOT="$(/usr/bin/mktemp /var/tmp/refresh-binancebot-baseline.XXXXXX.dump)"; then
-    echo "ERROR: could not create protected temporary snapshot" >&2
-    exit 70
-fi
-readonly SNAPSHOT
-/usr/bin/chmod 0600 -- "${SNAPSHOT}"
+data_dir=$(admin -c "SHOW data_directory") || fail 69 "Cannot query local PostgreSQL."
+[[ -d $data_dir ]] || fail 69 "Cannot access PostgreSQL data directory."
+exec 9>"$data_dir/.binancebot-refresh.lock"
+flock -n 9 || fail 75 "Another baseline refresh is running."
 
+spool=""
+stage="preflight"
+started=$SECONDS
 cleanup() {
-    /usr/bin/rm -f -- "${SNAPSHOT}"
+    local status=$?
+    if [[ -n $spool ]]; then rm -f -- "$spool"; fi
+    if (( status != 0 )); then
+        log "$stage stopped (exit $status, elapsed $((SECONDS - started))s)." >&2
+    fi
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-if ! /usr/bin/cp --reflink=never -- "${SNAPSHOT_INPUT}" "${SNAPSHOT}"; then
-    echo "ERROR: could not copy snapshot into protected temporary storage" >&2
-    exit 74
+[[ $(admin -c "
+    SELECT NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+       AND rolcanlogin AND NOT pg_has_role(rolname, 'postgres', 'MEMBER')
+      FROM pg_roles WHERE rolname='$OWNER'") == t ]] ||
+    fail 78 "The Work role is missing or has unsafe privileges."
+baseline_exists=false
+previous_exists=false
+candidate_exists=false
+if db_exists "$BASELINE"; then
+    protected "$BASELINE" ready || fail 78 "Baseline protection failed; obtain administrator review."
+    baseline_exists=true
+    idle "$BASELINE"
+fi
+if db_exists "$PREVIOUS"; then
+    protected "$PREVIOUS" ready || fail 78 "Previous baseline protection failed."
+    previous_exists=true
+    idle "$PREVIOUS"
+fi
+if db_exists "$CANDIDATE"; then
+    protected "$CANDIDATE" restoring || fail 78 "Candidate protection failed."
+    candidate_exists=true
+    idle "$CANDIDATE"
+fi
+if db_exists "$WORK"; then
+    [[ $baseline_exists == true ]] || fail 78 "Work exists without a baseline; obtain administrator review."
+    [[ $(admin -c "SELECT pg_get_userbyid(datdba) = '$OWNER' FROM pg_database WHERE datname='$WORK'") == t ]] ||
+        fail 78 "Unexpected owner of Work database."
+    idle "$WORK"
+fi
+if [[ $previous_exists == true && ( $baseline_exists == false || $candidate_exists == true ) ]]; then
+    fail 78 "Unexpected previous-baseline state; obtain administrator review."
 fi
 
-echo "PostgreSQL baseline refresh"
-echo "  snapshot:  ${SNAPSHOT_INPUT}"
-echo "  baseline:  ${BASELINE}"
-echo "  candidate: ${CANDIDATE}"
-echo
-
-echo "Validating snapshot..."
-
-if ! "${PG_BIN}/pg_restore" --list "${SNAPSHOT}" >/dev/null; then
-    echo "ERROR: invalid PostgreSQL custom-format snapshot" >&2
-    exit 65
-fi
-
-echo "Snapshot OK"
-echo
-
-SNAPSHOT_SHA256=""
-if ! SNAPSHOT_SHA256="$(/usr/bin/sha256sum -- "${SNAPSHOT}")"; then
-    echo "ERROR: could not hash protected snapshot copy" >&2
-    exit 74
-fi
-SNAPSHOT_SHA256="${SNAPSHOT_SHA256%%[[:space:]]*}"
-if [[ ! "${SNAPSHOT_SHA256}" =~ ^[[:xdigit:]]{64}$ ]]; then
-    echo "ERROR: snapshot hash output was invalid" >&2
-    exit 74
-fi
-readonly SNAPSHOT_SHA256
-readonly RESTORE_MARKER="gpt-work baseline refresh v1; state=restored; sha256=${SNAPSHOT_SHA256}"
-
-echo "Checking database state..."
-
-if ! psql_admin -d postgres -Atqc \
-    "SELECT 1 FROM pg_database WHERE datname='${BASELINE}'" |
-    /usr/bin/grep -qx 1; then
-    echo "ERROR: baseline database does not exist: ${BASELINE}" >&2
-    exit 69
-fi
-
-if psql_admin -d postgres -Atqc \
-    "SELECT 1 FROM pg_database WHERE datname='${CANDIDATE}'" |
-    /usr/bin/grep -qx 1; then
-    if [[ "${RESUME}" != true ]]; then
-        echo "ERROR: candidate already exists: ${CANDIDATE}" >&2
-        echo "Use --resume only after verifying that its restore completed." >&2
-        exit 70
+stage="spool verification"
+for stale in "$SPOOL".??????????.dump; do
+    if [[ -f $stale && ! -L $stale && -O $stale && $(stat -c %a -- "$stale") == 600 ]]; then
+        rm -f -- "$stale"
     fi
-elif [[ "${RESUME}" == true ]]; then
-    echo "ERROR: --resume requested but candidate does not exist: ${CANDIDATE}" >&2
-    exit 70
-fi
-
-if [[ "${RESUME}" == true ]]; then
-    CANDIDATE_MARKER=""
-    if ! CANDIDATE_MARKER="$(
-        psql_admin -d postgres -Atqc "
-            SELECT COALESCE(shobj_description(oid, 'pg_database'), '')
-            FROM pg_database
-            WHERE datname='${CANDIDATE}'
-        "
-    )"; then
-        echo "ERROR: could not read candidate restore marker" >&2
-        exit 90
-    fi
-    readonly CANDIDATE_MARKER
-
-    if [[ "${CANDIDATE_MARKER}" != "${RESTORE_MARKER}" ]]; then
-        echo "ERROR: candidate has no matching completed-restore marker" >&2
-        echo "The supplied dump is not byte-for-byte identical to the completed restore." >&2
-        echo "Refusing to resume a partial restore or a candidate from another dump." >&2
-        exit 70
-    fi
-fi
-
-if psql_admin -d postgres -Atqc \
-    "SELECT 1 FROM pg_database WHERE datname='${PREVIOUS}'" |
-    /usr/bin/grep -qx 1; then
-    echo "ERROR: previous baseline already exists: ${PREVIOUS}" >&2
-    echo "Refusing to overwrite or delete it automatically." >&2
-    exit 78
-fi
-
-echo "Database state OK"
-
-if [[ "${RESUME}" == true ]]; then
-    echo
-    echo "Resume mode: supplied dump matches the completed-restore marker."
-    echo "Keeping existing candidate; restore will not be repeated."
+done
+spool=$(mktemp "$SPOOL.XXXXXXXXXX.dump")
+log "Receiving archive into protected storage."
+if [[ $input == --stdin ]]; then
+    digest=$(tee "$spool" | sha256sum) || fail 74 "Could not spool archive."
 else
-    echo
-    echo "Checking disk space..."
+    digest=$(tee "$spool" < "$input" | sha256sum) || fail 74 "Could not spool archive."
+fi
+sha=${digest%% *}
+[[ -z $expected || $sha == "$expected" ]] || fail 65 "Archive checksum mismatch."
+"$PG_BIN/pg_restore" --list "$spool" >/dev/null 2>&1 ||
+    fail 65 "Archive is unreadable; use a verified PostgreSQL custom dump."
+log "Archive verified (bytes=$(stat -c %s -- "$spool"), sha256=$sha, elapsed ${SECONDS}s)."
 
-    PG_DATA=""
-    if ! PG_DATA="$(psql_admin -d postgres -Atqc 'SHOW data_directory')" ||
-        [[ -z "${PG_DATA}" ]]; then
-        echo "ERROR: could not determine PostgreSQL data directory" >&2
-        exit 90
-    fi
-    readonly PG_DATA
+marker() { printf 'gpt-work baseline refresh v2; state=%s; sha256=%s' "$1" "$sha"; }
+baseline_marker=$(db_marker "$BASELINE")
+stage="baseline recovery"
+if [[ $previous_exists == true ]]; then
+    [[ $(db_marker "$PREVIOUS") == "$(marker previous)" &&
+        ( $baseline_marker == "$(marker ready)" || $baseline_marker == "$(marker complete)" ) ]] ||
+        fail 78 "Unexpected previous baseline or different dump; use the original verified dump or obtain administrator review."
+fi
 
-    BASELINE_BYTES=""
-    if ! BASELINE_BYTES="$(psql_admin -d postgres -Atqc \
-        "SELECT pg_database_size('${BASELINE}')")"; then
-        echo "ERROR: could not determine baseline size" >&2
-        exit 90
-    fi
-    require_nonnegative_integer "${BASELINE_BYTES}" "baseline size"
-    readonly BASELINE_BYTES
-
-    AVAILABLE_BYTES=""
-    if ! AVAILABLE_BYTES="$(/usr/bin/df -PB1 -- "${PG_DATA}" | /usr/bin/awk 'NR == 2 {print $4}')"; then
-        echo "ERROR: could not determine available space" >&2
-        exit 90
-    fi
-    require_nonnegative_integer "${AVAILABLE_BYTES}" "available space"
-    readonly AVAILABLE_BYTES
-
-    # Candidate should be roughly the size of the current baseline.
-    # Require an additional 25% safety margin for growth and filesystem overhead.
-    readonly REQUIRED_BYTES=$(( BASELINE_BYTES + BASELINE_BYTES / 4 ))
-
-    printf '  baseline size: %d GiB\n' \
-        "$(( BASELINE_BYTES / 1024 / 1024 / 1024 ))"
-
-    printf '  required free: %d GiB\n' \
-        "$(( REQUIRED_BYTES / 1024 / 1024 / 1024 ))"
-
-    printf '  available:     %d GiB\n' \
-        "$(( AVAILABLE_BYTES / 1024 / 1024 / 1024 ))"
-
-    if (( AVAILABLE_BYTES < REQUIRED_BYTES )); then
-        echo "ERROR: insufficient disk space for safe restore" >&2
-        exit 71
+if [[ $candidate_exists == false && ( $baseline_marker == "$(marker ready)" ||
+    $baseline_marker == "$(marker complete)" ) ]]; then
+    log "Matching baseline already promoted; skipping restore."
+else
+    [[ $baseline_marker != 'gpt-work baseline refresh v2; state=ready;'* ]] ||
+        fail 78 "Promotion awaits completion; retry with its original verified dump."
+    stage="candidate restore"
+    ready=false
+    if [[ $candidate_exists == true ]]; then
+        candidate_marker=$(db_marker "$CANDIDATE")
+        if [[ $candidate_marker == "$(marker ready)" ||
+            $candidate_marker == "gpt-work baseline refresh v1; state=restored; sha256=$sha" ]]; then
+            ready=true
+            log "Matching completed candidate found; skipping restore."
+        elif [[ $candidate_marker == "$(marker restoring)" && $resume == false ]]; then
+            log "Removing the marked partial candidate for this archive."
+            admin -qc "DROP DATABASE $CANDIDATE"
+            candidate_exists=false
+        else
+            fail 78 "Candidate is unrecognized, incomplete in --resume mode, or belongs to a different dump; inspect it before retrying."
+        fi
+    elif [[ $resume == true ]]; then
+        fail 78 "No matching completed candidate or promoted baseline to resume."
     fi
 
-    echo "Disk space OK"
-
-    echo
-    echo "Creating protected candidate database..."
-
-    # Keep the staging database inaccessible to WORK_OWNER throughout the restore.
-    # pg_restore connects as postgres and SET ROLEs to WORK_OWNER, so WORK_OWNER
-    # needs CREATE on the database but does not need CONNECT.
-    psql_admin -d postgres -v ON_ERROR_STOP=1 -c \
-        "CREATE DATABASE ${CANDIDATE} OWNER postgres CONNECTION LIMIT 0;"
-
-    psql_admin -d postgres -v ON_ERROR_STOP=1 <<SQL
-    REVOKE CONNECT ON DATABASE ${CANDIDATE} FROM PUBLIC;
-    GRANT CREATE ON DATABASE ${CANDIDATE} TO "${WORK_OWNER}";
+    if [[ $ready == false ]]; then
+        baseline_bytes=$(admin -c "SELECT COALESCE(pg_database_size(
+            (SELECT oid FROM pg_database WHERE datname='$BASELINE')), 0)")
+        archive_bytes=$(stat -c %s -- "$spool")
+        available_bytes=$(df -PB1 -- "$data_dir" | awk 'NR == 2 {print $4}')
+        [[ $baseline_bytes =~ ^[0-9]+$ && $available_bytes =~ ^[0-9]+$ ]] ||
+            fail 71 "Cannot determine capacity on the PostgreSQL filesystem."
+        estimate=$(( baseline_bytes > archive_bytes ? baseline_bytes : archive_bytes ))
+        (( available_bytes >= estimate * 5 / 2 )) ||
+            fail 71 "Insufficient space for the candidate, Work clone and restore overhead."
+        # Initially disallow every connection. Publish ACLs and the recovery marker together.
+        admin -qc "CREATE DATABASE $CANDIDATE OWNER postgres TEMPLATE template0 ALLOW_CONNECTIONS false CONNECTION LIMIT 0"
+        admin -q <<SQL
+BEGIN;
+REVOKE CONNECT ON DATABASE $CANDIDATE FROM PUBLIC, "$OWNER";
+GRANT CREATE ON DATABASE $CANDIDATE TO "$OWNER";
+COMMENT ON DATABASE $CANDIDATE IS '$(marker restoring)';
+ALTER DATABASE $CANDIDATE ALLOW_CONNECTIONS true;
+COMMIT;
 SQL
-
-    psql_admin -d "${CANDIDATE}" -v ON_ERROR_STOP=1 <<SQL
-    GRANT CREATE ON SCHEMA public TO "${WORK_OWNER}";
-SQL
-
-    echo "Restoring snapshot into candidate..."
-    SECONDS=0
-
-    if ! "${PG_BIN}/pg_restore" \
-        --host="${PG_SOCKET}" \
-        --port="${PG_PORT}" \
-        --username="${PG_ADMIN}" \
-        --no-password \
-        --dbname="${CANDIDATE}" \
-        --no-owner \
-        --no-acl \
-        --role="${WORK_OWNER}" \
-        < "${SNAPSHOT}"; then
-
-        echo "ERROR: restore failed" >&2
-        echo "Candidate left intact for inspection: ${CANDIDATE}" >&2
-        exit 72
+        psql_local -d "$CANDIDATE" -qc "GRANT CREATE ON SCHEMA public TO \"$OWNER\""
+        log "Restoring candidate with $jobs worker(s)."
+        restore_start=$SECONDS
+        if "$PG_BIN/pg_restore" -w -h "$PG_SOCKET" -p "$PG_PORT" -U postgres \
+            --dbname="$CANDIDATE" --no-owner --no-acl --no-tablespaces \
+            --role="$OWNER" --exit-on-error --jobs="$jobs" "$spool" >/dev/null 2>&1; then
+            log "Restore completed (elapsed $((SECONDS - restore_start))s)."
+        else
+            fail 72 "pg_restore exited $?. Retry using the same verified dump to rebuild the partial candidate."
+        fi
     fi
 
-    psql_admin -d postgres -v ON_ERROR_STOP=1 -c \
-        "COMMENT ON DATABASE ${CANDIDATE} IS '${RESTORE_MARKER}';"
+    stage="candidate validation"
+    objects_ok "$CANDIDATE" || fail 73 "Candidate has missing application objects or unexpected owners."
+    psql_local -d "$CANDIDATE" -qc "REVOKE CREATE ON SCHEMA public FROM \"$OWNER\""
+    admin -qc "REVOKE CREATE ON DATABASE $CANDIDATE FROM \"$OWNER\""
+    protected "$CANDIDATE" ready || fail 78 "Candidate protection failed after restore."
+    admin -qc "COMMENT ON DATABASE $CANDIDATE IS '$(marker ready)'"
 
-    ELAPSED="${SECONDS}"
-
-    echo "Restore completed"
-    printf '  duration: %02d:%02d:%02d\n' \
-        "$(( ELAPSED / 3600 ))" \
-        "$(( (ELAPSED % 3600) / 60 ))" \
-        "$(( ELAPSED % 60 ))"
-fi
-echo
-echo "Validating candidate..."
-
-if ! INVALID_OBJECT_OWNERS="$(
-    psql_admin -d "${CANDIDATE}" -Atqc "
-        SELECT count(*)
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname IN ('bot', 'django')
-          AND c.relkind IN ('r','p','S','v','m')
-          AND pg_get_userbyid(c.relowner) <> '${WORK_OWNER}'
-    "
-)"; then
-    echo "ERROR: could not validate candidate object ownership" >&2
-    exit 90
-fi
-require_nonnegative_integer "${INVALID_OBJECT_OWNERS}" "invalid candidate owner count"
-
-if (( INVALID_OBJECT_OWNERS != 0 )); then
-    echo "ERROR: ${INVALID_OBJECT_OWNERS} application objects have unexpected ownership" >&2
-    exit 73
-fi
-
-if ! APP_OBJECTS="$(
-    psql_admin -d "${CANDIDATE}" -Atqc "
-        SELECT count(*)
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname IN ('bot', 'django')
-          AND c.relkind IN ('r','p','S','v','m')
-    "
-)"; then
-    echo "ERROR: could not count candidate application objects" >&2
-    exit 91
-fi
-require_nonnegative_integer "${APP_OBJECTS}" "candidate application object count"
-
-if (( APP_OBJECTS == 0 )); then
-    echo "ERROR: candidate contains no application objects" >&2
-    exit 74
-fi
-
-echo "Candidate OK"
-echo "  application objects: ${APP_OBJECTS}"
-echo "  owner:               ${WORK_OWNER}"
-
-echo
-echo "Finalizing candidate protection..."
-
-# CREATE privileges were needed only while pg_restore was running as WORK_OWNER.
-psql_admin -d "${CANDIDATE}" -v ON_ERROR_STOP=1 -c \
-    "REVOKE CREATE ON SCHEMA public FROM \"${WORK_OWNER}\";"
-
-psql_admin -d postgres -v ON_ERROR_STOP=1 -c \
-    "REVOKE CREATE ON DATABASE ${CANDIDATE} FROM \"${WORK_OWNER}\";"
-
-CANDIDATE_OWNER=""
-if ! CANDIDATE_OWNER="$(
-    psql_admin -d postgres -Atqc "
-        SELECT pg_get_userbyid(datdba)
-        FROM pg_database
-        WHERE datname='${CANDIDATE}'
-    "
-)"; then
-    echo "ERROR: could not determine candidate owner" >&2
-    exit 90
-fi
-readonly CANDIDATE_OWNER
-
-WORK_CAN_CONNECT=""
-if ! WORK_CAN_CONNECT="$(
-    psql_admin -d postgres -Atqc "
-        SELECT has_database_privilege(
-            '${WORK_OWNER}',
-            '${CANDIDATE}',
-            'CONNECT'
-        )
-    "
-)"; then
-    echo "ERROR: could not determine candidate CONNECT privilege" >&2
-    exit 90
-fi
-readonly WORK_CAN_CONNECT
-
-if [[ "${CANDIDATE_OWNER}" != "postgres" ]]; then
-    echo "ERROR: candidate database owner is ${CANDIDATE_OWNER}, expected postgres" >&2
-    exit 75
-fi
-
-if [[ "${WORK_CAN_CONNECT}" != "f" ]]; then
-    echo "ERROR: ${WORK_OWNER} still has CONNECT privilege on candidate" >&2
-    exit 76
-fi
-
-echo "Candidate protected"
-echo "  database owner: postgres"
-echo "  ${WORK_OWNER} CONNECT: denied"
-
-echo
-echo "Promoting candidate..."
-
-# The current baseline remains available under PREVIOUS until
-# the candidate has successfully taken its place.
-psql_admin -d postgres -v ON_ERROR_STOP=1 -c \
-    "ALTER DATABASE ${BASELINE} RENAME TO ${PREVIOUS};"
-
-if ! psql_admin -d postgres -v ON_ERROR_STOP=1 -c \
-    "ALTER DATABASE ${CANDIDATE} RENAME TO ${BASELINE};"; then
-
-    echo "ERROR: candidate promotion failed; restoring previous baseline name" >&2
-
-    if psql_admin -d postgres -v ON_ERROR_STOP=1 -c \
-        "ALTER DATABASE ${PREVIOUS} RENAME TO ${BASELINE};"; then
-        echo "Previous baseline name restored." >&2
+    stage="atomic baseline promotion"
+    log "Promoting validated candidate."
+    if [[ $baseline_exists == true ]]; then
+        admin -q <<SQL
+BEGIN;
+COMMENT ON DATABASE $BASELINE IS '$(marker previous)';
+ALTER DATABASE $BASELINE RENAME TO $PREVIOUS;
+ALTER DATABASE $CANDIDATE RENAME TO $BASELINE;
+COMMIT;
+SQL
+        previous_exists=true
     else
-        echo "CRITICAL: automatic baseline-name rollback failed." >&2
-        echo "Manual PostgreSQL intervention required." >&2
+        admin -qc "ALTER DATABASE $CANDIDATE RENAME TO $BASELINE"
     fi
-
-    exit 77
+    baseline_marker=$(marker ready)
 fi
 
-echo
-echo "Validating promoted baseline..."
-
-BASELINE_OWNER=""
-if ! BASELINE_OWNER="$(
-    psql_admin -d postgres -Atqc "
-        SELECT pg_get_userbyid(datdba)
-        FROM pg_database
-        WHERE datname='${BASELINE}'
-    "
-)"; then
-    echo "ERROR: could not determine promoted baseline owner" >&2
-    exit 90
+stage="baseline and Work verification"
+protected "$BASELINE" ready && objects_ok "$BASELINE" ||
+    fail 78 "Promoted baseline validation failed; obtain administrator review."
+if [[ $baseline_marker != "$(marker complete)" ]] || ! work_ok; then
+    stage="Work reset"
+    reset_start=$SECONDS
+    log "Recreating Work through the installed reset helper."
+    "$RESET" || fail 82 "Work reset failed; retry the original verified dump."
+    log "Work reset completed (elapsed $((SECONDS - reset_start))s)."
+else
+    log "Existing Work database passed validation; skipping reset."
 fi
-readonly BASELINE_OWNER
-
-BASELINE_WORK_CAN_CONNECT=""
-if ! BASELINE_WORK_CAN_CONNECT="$(
-    psql_admin -d postgres -Atqc "
-        SELECT has_database_privilege(
-            '${WORK_OWNER}',
-            '${BASELINE}',
-            'CONNECT'
-        )
-    "
-)"; then
-    echo "ERROR: could not determine promoted baseline CONNECT privilege" >&2
-    exit 90
+stage="completion"
+work_ok || fail 83 "Work validation failed; retry the original verified dump or obtain administrator review."
+admin -qc "COMMENT ON DATABASE $BASELINE IS '$(marker complete)'"
+if [[ $previous_exists == true ]]; then
+    admin -qc "DROP DATABASE $PREVIOUS"
 fi
-readonly BASELINE_WORK_CAN_CONNECT
-
-BASELINE_APP_OBJECTS=""
-if ! BASELINE_APP_OBJECTS="$(
-    psql_admin -d "${BASELINE}" -Atqc "
-        SELECT count(*)
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname IN ('bot', 'django')
-          AND c.relkind IN ('r','p','S','v','m')
-    "
-)"; then
-    echo "ERROR: could not count promoted baseline application objects" >&2
-    exit 90
-fi
-require_nonnegative_integer "${BASELINE_APP_OBJECTS}" "promoted baseline application object count"
-readonly BASELINE_APP_OBJECTS
-
-if [[ "${BASELINE_OWNER}" != "postgres" ]]; then
-    echo "ERROR: promoted baseline owner is ${BASELINE_OWNER}, expected postgres" >&2
-    exit 79
-fi
-
-if [[ "${BASELINE_WORK_CAN_CONNECT}" != "f" ]]; then
-    echo "ERROR: ${WORK_OWNER} can CONNECT to promoted baseline" >&2
-    exit 80
-fi
-
-if (( BASELINE_APP_OBJECTS == 0 )); then
-    echo "ERROR: promoted baseline contains no application objects" >&2
-    exit 81
-fi
-
-echo "Promoted baseline OK"
-echo "  database owner:       ${BASELINE_OWNER}"
-echo "  application objects:  ${BASELINE_APP_OBJECTS}"
-echo "  ${WORK_OWNER} CONNECT: denied"
-
-echo
-echo "Resetting work database from promoted baseline..."
-
-if ! /usr/local/sbin/reset-binancebot-work; then
-    echo "ERROR: work database reset failed" >&2
-    echo "Previous baseline preserved as: ${PREVIOUS}" >&2
-    exit 82
-fi
-
-echo "Validating work database..."
-
-readonly WORK_DB="binancebot_work"
-
-WORK_APP_OBJECTS=""
-if ! WORK_APP_OBJECTS="$(
-    psql_admin -d "${WORK_DB}" -Atqc "
-        SELECT count(*)
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname IN ('bot', 'django')
-          AND c.relkind IN ('r','p','S','v','m')
-    "
-)"; then
-    echo "ERROR: could not count work application objects" >&2
-    echo "Previous baseline preserved as: ${PREVIOUS}" >&2
-    exit 90
-fi
-require_nonnegative_integer "${WORK_APP_OBJECTS}" "work application object count"
-readonly WORK_APP_OBJECTS
-
-WORK_INVALID_OBJECT_OWNERS=""
-if ! WORK_INVALID_OBJECT_OWNERS="$(
-    psql_admin -d "${WORK_DB}" -Atqc "
-        SELECT count(*)
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname IN ('bot', 'django')
-          AND c.relkind IN ('r','p','S','v','m')
-          AND pg_get_userbyid(c.relowner) <> '${WORK_OWNER}'
-    "
-)"; then
-    echo "ERROR: could not validate work object ownership" >&2
-    echo "Previous baseline preserved as: ${PREVIOUS}" >&2
-    exit 90
-fi
-require_nonnegative_integer "${WORK_INVALID_OBJECT_OWNERS}" "invalid work owner count"
-readonly WORK_INVALID_OBJECT_OWNERS
-
-if (( WORK_APP_OBJECTS == 0 )); then
-    echo "ERROR: work database contains no application objects" >&2
-    echo "Previous baseline preserved as: ${PREVIOUS}" >&2
-    exit 83
-fi
-
-if (( WORK_INVALID_OBJECT_OWNERS != 0 )); then
-    echo "ERROR: ${WORK_INVALID_OBJECT_OWNERS} work objects have unexpected ownership" >&2
-    echo "Previous baseline preserved as: ${PREVIOUS}" >&2
-    exit 84
-fi
-
-echo "Work database OK"
-echo "  application objects: ${WORK_APP_OBJECTS}"
-echo "  owner:               ${WORK_OWNER}"
-
-echo
-echo "Removing previous baseline..."
-
-"${PG_BIN}/dropdb" \
-    --host="${PG_SOCKET}" \
-    --port="${PG_PORT}" \
-    --username="${PG_ADMIN}" \
-    --no-password \
-    --if-exists \
-    --force \
-    "${PREVIOUS}"
-
-echo
-echo "Baseline refresh completed successfully"
-echo "  baseline: ${BASELINE}"
-echo "  work:     ${WORK_DB}"
-echo "  previous: removed"
+log "Baseline and Work verified (elapsed ${SECONDS}s)."

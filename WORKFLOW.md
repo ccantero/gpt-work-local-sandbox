@@ -28,6 +28,14 @@ Example paths use `<work-home>` for the restricted account's home and
 `<human-staging>` for a human-writable staging directory. On the validated
 installation, `<work-home>` is `/home/local-gpt-work`.
 
+## Refresh the BinanceBot databases
+
+From the human-controlled checkout, use `./db_refresh --full` to capture
+and restore a fresh production dump, or `./db_refresh --restore-only` to
+retry from a verified local dump. The
+[database runbook](RUNBOOK.md#unattended-postgresql-dump-and-restore)
+covers detached execution and recovery.
+
 ## Step 1: synchronize the human application repository
 
 The human operator synchronizes and reviews the real application repository
@@ -120,9 +128,9 @@ PROD_VPS_IP='<production-vps-ip>' \
 ```
 
 The launcher is run by the human, not from a separate graphical login for
-`local-gpt-work`. It grants the restricted account access to the human's X
-display, checks or adds an owner-matched firewall reject rule for the supplied
-address, and uses `sudo -u local-gpt-work` to start the installed ChatGPT
+`local-gpt-work`. It checks or adds the owner-matched firewall reject rule
+before granting the restricted account access to the human's X display.
+It uses `sudo -u local-gpt-work` to start the installed ChatGPT
 application with the restricted account's runtime and D-Bus paths. Cleanup
 revokes graphical access and removes the firewall rule only if this invocation
 added it.

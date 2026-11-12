@@ -1,0 +1,598 @@
+#!/usr/bin/python3
+"""Human-side orchestration for the fixed BinanceBot Work installation."""
+
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent
+PG = Path("/usr/lib/postgresql/17/bin")
+REFRESH = "/usr/local/sbin/refresh-binancebot-baseline"
+RESET = "/usr/local/sbin/reset-binancebot-work"
+WORK = "binancebot_work"
+BASELINE = WORK + "_baseline"
+CANDIDATE = BASELINE + "_candidate"
+PREVIOUS = BASELINE + "_previous"
+ROLE = "local-gpt-work"
+SPOOL = Path("/var/tmp")
+TOKEN = "BINANCE_GATEWAY_TOKEN"
+SHA = re.compile(r"[0-9a-f]{64}")
+MARKER = re.compile(r"gpt-work baseline refresh v2; state=(\w+); sha256=([0-9a-f]{64})")
+LEGACY_MARKER = re.compile(r"gpt-work baseline refresh v1; state=restored; sha256=([0-9a-f]{64})")
+SNAPSHOT_NAME = re.compile(r"snapshot-(\d{8}T\d{6})-[a-z0-9_]{8}")
+NAMES = (WORK, BASELINE, CANDIDATE, PREVIOUS)
+GIB = 1024**3
+
+
+class Failure(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+class Interrupted(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def interrupt(signum, _frame):
+    raise Interrupted(signum)
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def log(message):
+    print(f"[{now()}] {message}", flush=True)
+
+
+@contextlib.contextmanager
+def stage(name):
+    start = time.monotonic()
+    log(f"Starting {name}")
+    try:
+        yield
+    except Interrupted:
+        log(f"Interrupted {name} ({time.monotonic() - start:.1f}s)")
+        raise
+    except Exception:
+        log(f"Failed {name} ({time.monotonic() - start:.1f}s)")
+        raise
+    else:
+        log(f"Completed {name} ({time.monotonic() - start:.1f}s)")
+
+
+def run(command, error, *, source=False, capture=False, show=False, stdin=None, pass_fds=()):
+    env = {key: value for key, value in os.environ.items() if key != TOKEN}
+    if source:
+        env.update(PGCONNECT_TIMEOUT="10", PGOPTIONS="-c default_transaction_read_only=on")
+    else:
+        env = {key: value for key, value in env.items() if not key.startswith("PG")}
+    # Keep diagnostics from libpq, pg_dump and pg_restore out of operator logs.
+    with subprocess.Popen(
+        command, env=env, stdin=stdin if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else (None if show else subprocess.DEVNULL),
+        stderr=None if show else subprocess.DEVNULL, text=True, start_new_session=True,
+        pass_fds=pass_fds,
+    ) as child:
+        try:
+            output, _ = child.communicate()
+        except Interrupted as exc:
+            for sig, timeout in ((signal.SIGTERM, 15), (signal.SIGKILL, None)):
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, sig)
+                try:
+                    child.wait(timeout=timeout)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            raise exc
+        if child.returncode:
+            raise Failure(f"{error} (exit {child.returncode})")
+    return output.strip() if capture else None
+
+
+def sudo(user, *command):
+    return ["/usr/bin/sudo", "-n", "-u", user, "--", *command]
+
+
+def allowed(user, *command):
+    run(["/usr/bin/sudo", "-n", "-l", "-u", user, "--", *command],
+        f"Noninteractive sudo preflight failed for {user}: {command[0]}. See SETUP.md")
+
+
+def query(sql, *, role="postgres", database="postgres"):
+    return run(sudo(role, PG / "psql", "-XwAt", "-v", "ON_ERROR_STOP=1",
+                    "-h", "/var/run/postgresql", "-p", "5432", "-U", role,
+                    "-d", database, "-c", sql),
+               f"Cannot query local PostgreSQL as {role} in {database}; check socket, peer authentication and sudo",
+               capture=True)
+
+
+def state():
+    info = json.loads(query("""
+        SELECT json_build_object(
+          'version', current_setting('server_version_num')::int,
+          'data', current_setting('data_directory'),
+          'safe_role', coalesce((
+            SELECT rolcanlogin AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+               AND NOT pg_has_role(rolname, 'postgres', 'MEMBER')
+              FROM pg_roles WHERE rolname = 'local-gpt-work'
+          ), false),
+          'databases', coalesce((
+            SELECT json_object_agg(datname, json_build_object(
+                'owner', pg_get_userbyid(datdba), 'limit', datconnlimit, 'allow', datallowconn,
+                'connect', has_database_privilege((SELECT oid FROM pg_roles WHERE rolname='local-gpt-work'), oid, 'CONNECT'),
+                'create', has_database_privilege((SELECT oid FROM pg_roles WHERE rolname='local-gpt-work'), oid, 'CREATE'),
+                'tablespace', (SELECT spcname FROM pg_tablespace WHERE oid=dattablespace),
+                'bytes', pg_database_size(datname),
+                'sessions', (SELECT count(*) FROM pg_stat_activity WHERE datid=d.oid),
+                'marker', shobj_description(d.oid, 'pg_database')
+            )) FROM pg_database d WHERE datname IN
+                ('binancebot_work','binancebot_work_baseline',
+                 'binancebot_work_baseline_candidate','binancebot_work_baseline_previous')
+          ), '{}'::json)
+        )
+    """))
+    log(f"Local PostgreSQL server_version_num={info['version']}")
+    for name in NAMES:
+        db = info["databases"].get(name)
+        if db is None:
+            log(f"{name}: absent")
+            continue
+        marker = db["marker"] or ""
+        if not MARKER.fullmatch(marker) and not LEGACY_MARKER.fullmatch(marker):
+            marker = "unrecognized" if marker else "none"
+        log(f"{name}: owner={db['owner']} bytes={db['bytes']} limit={db['limit']} "
+            f"Work CONNECT={db['connect']} active sessions={db['sessions']} marker={marker}")
+    return info
+
+
+def validate_state(info, action):
+    if info["version"] // 10000 != 17 or not info["safe_role"]:
+        raise Failure("Expected PostgreSQL 17 and a restricted local-gpt-work login role")
+    databases = info["databases"]
+    for name, db in databases.items():
+        owner = ROLE if name == WORK else "postgres"
+        if db["owner"] != owner or db["tablespace"] != "pg_default":
+            raise Failure(f"Unexpected owner or default tablespace on {name}; obtain administrator review")
+        if name != WORK and (db["limit"] != 0 or db["connect"] or (db["create"] and name != CANDIDATE)):
+            # CREATE can exist temporarily while a protected candidate is restoring.
+            raise Failure(f"Protection checks failed on {name}; obtain administrator review")
+        if action in ("refresh", "reuse_dump", "reset_work") and db["sessions"]:
+            raise Failure(f"Stop ChatGPT Work and application sessions on {name} before retrying", 75)
+    baseline = databases.get(BASELINE)
+    pending = CANDIDATE in databases or PREVIOUS in databases or (
+        baseline and (baseline["marker"] or "").startswith("gpt-work baseline refresh v2; state=ready;")
+    )
+    if pending and action != "reuse_dump":
+        raise Failure("An earlier refresh needs recovery. Use ./db_refresh --restore-only or inspect --status", 78)
+    if not baseline and (WORK in databases or action in ("check", "reset_work")):
+        raise Failure("Protected baseline absent; prepare it with --refresh or --reuse-dump first")
+
+
+def protected_path(path):
+    path = Path(path).expanduser().absolute()
+    if path != path.resolve() or any((parent / ".git").exists() for parent in path.parents):
+        raise Failure("Use a non-symlink dump path outside Git checkouts")
+    if path.is_relative_to(Path("/home") / ROLE):
+        raise Failure("Use human-controlled storage outside the Work account")
+    for parent in path.parents:
+        if not parent.exists():
+            continue
+        metadata = parent.stat()
+        if metadata.st_uid not in (0, os.geteuid()) or (
+            metadata.st_mode & 0o022 and not (metadata.st_uid == 0 and metadata.st_mode & stat.S_ISVTX)
+        ):
+            raise Failure(f"Dump path has an untrusted parent: {parent}")
+    return path
+
+
+def private(path, mode):
+    metadata = path.lstat()
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != mode:
+        raise Failure(f"Expected an operator-owned path with mode {mode:04o}: {path}")
+    return metadata
+
+
+def dump_directory(value, create=False):
+    path = protected_path(value)
+    if create:
+        path.mkdir(mode=0o700, exist_ok=True)
+    if not path.is_dir():
+        raise Failure(f"Create the operator-only dump directory with mode 0700: {path}")
+    private(path, 0o700)
+    return path
+
+
+def measure(path, expected=None):
+    if not stat.S_ISREG(private(path, 0o600).st_mode):
+        raise Failure("Archive must be a regular file")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as archive:
+        metadata = os.fstat(archive.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or not metadata.st_size:
+            raise Failure("Archive must be a nonempty regular file")
+        digest = hashlib.file_digest(archive, "sha256").hexdigest()
+    if expected and digest != expected:
+        raise Failure("Archive checksum mismatch", 65)
+    log(f"Archive bytes={metadata.st_size} sha256={digest}")
+    return digest, metadata.st_size
+
+
+def archive_check(path, *, full=False):
+    command = [PG / "pg_restore", "--file=/dev/null" if full else "--list", path]
+    try:
+        run(command, "Archive is corrupt or incomplete; supply a verified PostgreSQL custom dump")
+    except Failure as exc:
+        raise Failure(str(exc), 65) from exc
+
+
+def manifest(path):
+    receipt = path.parent / "snapshot.json"
+    private(receipt, 0o600)
+    if not stat.S_ISREG(receipt.lstat().st_mode):
+        raise Failure("Snapshot metadata must be a regular file")
+    data = json.loads(receipt.read_text())
+    if not isinstance(data, dict) or not isinstance(data.get("sha256"), str) or not SHA.fullmatch(data["sha256"]):
+        raise Failure("Snapshot metadata has an invalid checksum", 65)
+    if type(data.get("bytes")) is not int or data["bytes"] <= 0 or (
+        type(data.get("source_bytes", 0)) is not int or data.get("source_bytes", 0) < 0
+    ):
+        raise Failure("Snapshot metadata has an invalid size", 65)
+    return data
+
+
+def reuse(value, approved_sha):
+    path = protected_path(value)
+    if path.is_dir():
+        path = path / "snapshot.dump"
+    path = protected_path(path)
+    private(path.parent, 0o700)
+    recorded = None
+    if path.name == "snapshot.dump" and (path.parent / "snapshot.json").exists():
+        recorded = manifest(path)
+    expected = approved_sha or (recorded and recorded["sha256"])
+    if not expected:
+        raise Failure("For an existing dump without a managed manifest, supply the approved --sha256")
+    if recorded and expected != recorded["sha256"]:
+        raise Failure("Approved checksum disagrees with the managed manifest")
+    digest, size = measure(path, expected)
+    if recorded and size != recorded["bytes"]:
+        raise Failure("Archive size disagrees with the managed manifest")
+    # Managed archives were scanned before publication; externally approved files still need a full scan.
+    archive_check(path, full=not recorded)
+    return path, digest, size, (recorded or {}).get("source_bytes", 0)
+
+
+def recovery_digest(databases):
+    baseline = MARKER.fullmatch(databases.get(BASELINE, {}).get("marker") or "")
+    if CANDIDATE in databases:
+        if PREVIOUS in databases or (baseline and baseline[1] == "ready"):
+            raise Failure("Unexpected candidate and promotion state. Have the PostgreSQL administrator inspect it.", 78)
+        comment = databases[CANDIDATE]["marker"] or ""
+        candidate = MARKER.fullmatch(comment)
+        if candidate and candidate[1] in ("restoring", "ready"):
+            return candidate[2]
+        legacy = LEGACY_MARKER.fullmatch(comment)
+        if legacy:
+            return legacy[1]
+        raise Failure("Unrecognized candidate. Have the PostgreSQL administrator inspect it before retrying.", 78)
+    if PREVIOUS in databases:
+        previous = MARKER.fullmatch(databases[PREVIOUS]["marker"] or "")
+        if not (previous and previous[1] == "previous" and baseline and
+                baseline[1] in ("ready", "complete") and baseline[2] == previous[2]):
+            raise Failure("Unrecognized previous baseline. Have the PostgreSQL administrator inspect it.", 78)
+        return previous[2]
+    return baseline[2] if baseline and baseline[1] == "ready" else None
+
+
+def reuse_latest(directory, databases):
+    expected = recovery_digest(databases)
+    snapshots = []
+    for path in directory.glob("snapshot-*"):
+        name = SNAPSHOT_NAME.fullmatch(path.name)
+        if name:
+            snapshots.append((name[1], path.lstat().st_mtime_ns, path))
+    for _, _, path in sorted(snapshots, reverse=True):
+        try:
+            protected_path(path)
+            if not stat.S_ISDIR(private(path, 0o700).st_mode):
+                raise Failure("Managed snapshot must be a directory", 65)
+            if expected and manifest(path / "snapshot.dump")["sha256"] != expected:
+                continue
+            archive = reuse(path, expected)
+        except (Failure, OSError, ValueError):
+            log(f"Skipping invalid snapshot: {path}")
+            continue
+        log(f"Using verified snapshot at {path}")
+        return archive
+    if expected:
+        raise Failure(f"No verified snapshot matches the interrupted refresh (sha256={expected})", 65)
+    raise Failure(f"No verified snapshot found in {directory}; use --full to create one", 65)
+
+
+def capacity(reserve, *requirements):
+    filesystems = {}
+    for path, needed in requirements:
+        device = path.stat().st_dev
+        volume = os.statvfs(path)
+        free = volume.f_bavail * volume.f_frsize
+        previous = filesystems.get(device, (path, free, 0))
+        filesystems[device] = (previous[0], min(free, previous[1]), previous[2] + needed)
+    for path, free, needed in filesystems.values():
+        log(f"Capacity {path}: available={free} estimated demand={needed} reserve={reserve} bytes")
+        if free < needed + reserve:
+            raise Failure(f"Insufficient free space on {path}; free space or use another approved dump volume", 71)
+
+
+def check_spool():
+    mode = SPOOL.lstat().st_mode
+    if not stat.S_ISDIR(mode) or (mode & stat.S_IWOTH and not mode & stat.S_ISVTX):
+        raise Failure(f"Expected a protected PostgreSQL spool directory at {SPOOL}")
+
+
+def restore_capacity(info, reserve, archive_size, estimate, *, dump_path=None, reset=False):
+    databases = info["databases"]
+    baseline_size = databases.get(BASELINE, {}).get("bytes", 0)
+    basis = max(baseline_size, archive_size, estimate)
+    # Charge peak growth above current usage, without relying on a forced drop to free space.
+    # An exact replay can skip restore, but space for Work may still be needed after interruption.
+    needs = [(Path(info["data"]), basis * (1 if reset else 2) * 5 // 4)]
+    if not reset:
+        needs.append((SPOOL, archive_size))
+    if dump_path:
+        needs.append((dump_path, archive_size))
+    capacity(reserve, *needs)
+
+
+@contextlib.contextmanager
+def locked_store(directory):
+    with (directory / ".capture.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Failure("A dump acquisition is already running", 75) from exc
+        for stale in directory.glob(".incoming-????????"):
+            if stale.is_dir() and not stale.is_symlink():
+                private(stale, 0o700)
+                for name in ("snapshot.dump", "snapshot.json"):
+                    (stale / name).unlink(missing_ok=True)
+                stale.rmdir()
+        yield lock.fileno()
+
+
+def durable(path):
+    with os.fdopen(os.open(path, os.O_RDONLY), "rb") as stream:
+        os.fsync(stream.fileno())
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def capture_dump(directory, info, args):
+    with locked_store(directory) as lock:
+        with stage("production connection and capacity"):
+            result = run([PG / "psql", "-XwAt", "-d", "service=vpsdatabase",
+                          "-c", "SELECT pg_database_size(current_database())"],
+                         "Configured vpsdatabase service unavailable; verify approved service and unattended authentication",
+                         source=True, capture=True)
+            source_bytes = int(result)
+            estimate = max(source_bytes, args.estimate_bytes)
+            restore_capacity(info, args.reserve_bytes, estimate, estimate, dump_path=directory)
+        with tempfile.TemporaryDirectory(prefix=".incoming-", dir=directory) as incoming:
+            temporary = Path(incoming)
+            path = temporary / "snapshot.dump"
+            with stage("production dump"):
+                run([PG / "pg_dump", "service=vpsdatabase", "--no-password", "--format=custom",
+                     "--no-owner", "--no-acl", f"--file={path}"],
+                    "pg_dump failed; no new snapshot was published", source=True, pass_fds=(lock,))
+            with stage("archive validation and publication"):
+                archive_check(path)
+                archive_check(path, full=True)
+                digest, size = measure(path)
+                metadata = temporary / "snapshot.json"
+                metadata.write_text(json.dumps({
+                    "sha256": digest, "bytes": size, "created_utc": now(),
+                    "source": "vpsdatabase", "source_bytes": source_bytes,
+                }) + "\n")
+                durable(path)
+                durable(metadata)
+                sync_directory(temporary)
+                target = directory / (
+                    dt.datetime.now(dt.timezone.utc).strftime("snapshot-%Y%m%dT%H%M%S-")
+                    + temporary.name.removeprefix(".incoming-")
+                )
+                temporary.rename(target)
+                sync_directory(directory)
+                log(f"Published verified snapshot at {target}")
+            return target / path.name, digest, size, source_bytes
+
+
+def verify_work():
+    sql = """
+        SELECT count(*) > 0 AND bool_and(pg_get_userbyid(relowner) = current_user)
+          FROM pg_class JOIN pg_namespace ON relnamespace=pg_namespace.oid
+         WHERE nspname IN ('bot','django') AND relkind IN ('r','p','S','v','m','f')
+    """
+    if query(sql, role=ROLE, database=WORK) != "t":
+        raise Failure("Work connected, but expected BinanceBot relations were missing or had unexpected owners")
+
+
+def list_dumps(directory):
+    paths = sorted(directory.glob("snapshot-*"))
+    if not paths:
+        log(f"No published snapshots in {directory}")
+    invalid = False
+    for path in paths:
+        try:
+            archive, _, _, _ = reuse(path, None)
+            data = manifest(archive)
+            log(f"Verified {archive.parent} created={data['created_utc']} source={data['source']}")
+        except (Failure, OSError, ValueError, KeyError):
+            log(f"Invalid or incomplete snapshot: {path}")
+            invalid = True
+    if invalid:
+        raise Failure("Snapshot listing found invalid archives; review the reported paths", 65)
+
+
+def arguments():
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_mutually_exclusive_group()
+    for mode in ("check", "status", "list-dumps", "refresh", "reset-work"):
+        modes.add_argument("--" + mode, action="store_true")
+    modes.add_argument("--reuse-dump", metavar="PATH")
+    modes.add_argument("--reuse-latest", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--sha256", metavar="APPROVED_SHA256")
+    parser.add_argument("--dump-dir", default=Path.home() / "binancebot-snapshots")
+    parser.add_argument("--jobs", type=int, choices=range(1, 9), default=1)
+    parser.add_argument("--estimate-bytes", type=int, default=0)
+    parser.add_argument("--reserve-bytes", type=int, default=GIB)
+    parser.add_argument("--workspace", nargs=3, metavar=("REPO", "COMMIT", "NAME"))
+    args = parser.parse_args()
+    if args.sha256 and (not args.reuse_dump or not SHA.fullmatch(args.sha256)):
+        parser.error("--sha256 requires --reuse-dump and 64 lowercase hex digits")
+    if min(args.reserve_bytes, args.estimate_bytes) < 0:
+        parser.error("Space estimates and reserves must be non-negative")
+    if (args.status or args.list_dumps or args.check) and args.workspace:
+        parser.error("Read-only operations cannot prepare a workspace")
+    if args.reuse_latest and args.workspace:
+        parser.error("--reuse-latest is a database-only operation")
+    return args
+
+
+def main(args):
+    os.umask(0o077)
+    if pwd.getpwuid(os.geteuid()).pw_name != "cristhian" or os.getuid() != ROOT.stat().st_uid:
+        raise Failure("Run as the human owner of the trusted checkout")
+    if args.list_dumps:
+        if not os.access(PG / "pg_restore", os.X_OK):
+            raise Failure("PostgreSQL 17 pg_restore is required to verify the snapshot listing", 69)
+        list_dumps(dump_directory(args.dump_dir))
+        return
+    action = "reuse_dump" if args.reuse_latest else next(
+        (mode for mode in ("status", "refresh", "reuse_dump", "reset_work") if getattr(args, mode)),
+        "prepare" if args.workspace else "check",
+    )
+    with stage("local preflight"):
+        refresh = action in ("refresh", "reuse_dump")
+        commands = ["/usr/bin/sudo", PG / "psql"]
+        if refresh or action == "check":
+            commands.append(PG / "pg_restore")
+        if action in ("refresh", "check"):
+            commands.append(PG / "pg_dump")
+        for command in commands:
+            if not os.access(command, os.X_OK):
+                raise Failure(f"Missing required executable: {command}", 69)
+        info = state()
+        if action == "status":
+            return
+        validate_state(info, action)
+        if refresh or action == "check":
+            check_spool()
+            for source, installed in (("refresh_baseline.sh", REFRESH), ("reset-binancebot-work", RESET)):
+                if not os.access(installed, os.X_OK) or not (ROOT / source).read_bytes() == Path(installed).read_bytes():
+                    raise Failure(f"Installed helper differs from this checkout: {installed}. See SETUP.md", 78)
+            allowed("postgres", REFRESH, "--jobs", str(args.jobs), "--sha256", "0" * 64, "--stdin")
+        if action == "check":
+            dump_directory(args.dump_dir)
+        if action in ("check", "reset_work"):
+            allowed("postgres", RESET)
+            restore_capacity(info, args.reserve_bytes, 0, args.estimate_bytes, reset=True)
+        workspace_command = [ROOT / "prepare-work-workspace.sh", "--ensure", "--non-interactive"]
+        if args.workspace:
+            run([*workspace_command, "--check", *args.workspace],
+                "Approved workspace preflight failed", show=True)
+
+    if refresh:
+        if action == "refresh":
+            archive = capture_dump(dump_directory(args.dump_dir, create=True), info, args)
+        else:
+            with stage("existing archive validation"):
+                if args.reuse_latest:
+                    archive = reuse_latest(dump_directory(args.dump_dir), info["databases"])
+                else:
+                    archive = reuse(args.reuse_dump, args.sha256)
+        path, digest, size, source_size = archive
+        apply_dump(info, args, path, digest, size, source_size)
+    elif action == "reset_work":
+        with stage("disposable Work reset"):
+            run(sudo("postgres", RESET), "Reset failed; inspect --status and retry --reset-work", show=True)
+
+    with stage("local database verification"):
+        if action != "check":
+            validate_state(state(), "check")
+        verify_work()
+    if args.workspace:
+        with stage("approved workspace"):
+            run([*workspace_command, *args.workspace], "Workspace preparation failed", show=True)
+    log("Preparation verified")
+
+
+def apply_dump(info, args, path, digest, size, source_size):
+    databases = info["databases"]
+    baseline = databases.get(BASELINE, {})
+    marker = MARKER.fullmatch(baseline.get("marker") or "")
+    matching = marker and marker[2] == digest and marker[1] in ("ready", "complete")
+    if matching and marker[1] == "complete" and CANDIDATE not in databases and PREVIOUS not in databases:
+        try:
+            verify_work()
+        except Failure:
+            pass
+        else:
+            log("Matching baseline and usable Work already present; skipping archive transfer and restore.")
+            return
+    with stage("restore capacity"):
+        candidate = databases.get(CANDIDATE, {})
+        ready = candidate.get("marker") in (
+            f"gpt-work baseline refresh v2; state=ready; sha256={digest}",
+            f"gpt-work baseline refresh v1; state=restored; sha256={digest}",
+        )
+        if matching:
+            capacity(args.reserve_bytes, (SPOOL, size), (Path(info["data"]), baseline["bytes"] * 5 // 4))
+        elif ready:
+            capacity(args.reserve_bytes, (SPOOL, size), (Path(info["data"]), candidate["bytes"] * 5 // 4))
+        else:
+            restore_capacity(info, args.reserve_bytes, size, max(source_size, args.estimate_bytes))
+    with stage("protected refresh"):
+        with path.open("rb") as archive_input:
+            run(sudo("postgres", REFRESH, "--jobs", str(args.jobs), "--sha256", digest, "--stdin"),
+                f"Protected refresh failed; inspect --status and retry with --reuse-dump {path}",
+                stdin=archive_input, show=True)
+
+
+def install_signal_handlers():
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, interrupt)
+    if signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, interrupt)
+
+
+if __name__ == "__main__":
+    install_signal_handlers()
+    try:
+        main(arguments())
+    except Interrupted as exc:
+        log("Interrupted. Inspect --status and reuse the published verified dump before requesting a new snapshot.")
+        sys.exit(128 + exc.signum)
+    except (Failure, OSError, ValueError, KeyError, TypeError) as exc:
+        log(f"Error: {exc}")
+        sys.exit(exc.code if isinstance(exc, Failure) else 1)

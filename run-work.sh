@@ -9,6 +9,7 @@ WORK_UID="$(id -u "$WORK_USER")"
 PROD_VPS_IP="${PROD_VPS_IP:?ERROR: PROD_VPS_IP is required}"
 
 RULE_ADDED=0
+XHOST_ADDED=0
 
 cleanup() {
     if [[ "$RULE_ADDED" -eq 1 ]]; then
@@ -18,13 +19,12 @@ cleanup() {
             -j REJECT || true
     fi
 
-    xhost -SI:localuser:"$WORK_USER" >/dev/null 2>&1 || true
+    if [[ "$XHOST_ADDED" -eq 1 ]]; then
+        xhost -SI:localuser:"$WORK_USER" >/dev/null 2>&1 || true
+    fi
 }
 
 trap cleanup EXIT INT TERM
-
-# Allow GUI access for the isolated user.
-xhost +SI:localuser:"$WORK_USER" >/dev/null
 
 # Add the firewall rule only if it does not already exist.
 if ! sudo iptables -C OUTPUT \
@@ -40,6 +40,10 @@ if ! sudo iptables -C OUTPUT \
 
     RULE_ADDED=1
 fi
+
+# Allow GUI access after the production reject rule is in place.
+xhost +SI:localuser:"$WORK_USER" >/dev/null
+XHOST_ADDED=1
 
 echo "Work sandbox:"
 echo "  user:      $WORK_USER"

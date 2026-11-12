@@ -1,32 +1,10 @@
 # ChatGPT Work workflow
 
-The infrastructure repository is a stable local control plane. Application
-projects are transferred from a human-owned repository through a handoff area
-into separate disposable Work workspaces; they are not developed inside the
-infrastructure checkout.
-
-```text
-human-owned application repository
-  -> approved Git commit
-  -> git archive plus provenance
-  -> source handoff
-  -> disposable application workspace
-  -> independent one-commit Git repository with no remote
-  -> Work changes and tests
-  -> patch and report outside the application repository
-  -> human verification, application, review, and testing
-  -> independent human commit, if accepted
-```
-
-The infrastructure checkout is the one exception to the archive model. This
-repository is public, so the restricted Work account may clone and pull it over
-public HTTPS without a GitHub token, SSH key, or human credentials. This
-control-plane access does not grant that account access to private application
-repositories; those continue to use the archive-and-provenance handoff below.
-
-Example paths use `<work-home>` for the restricted account's home and
-`<human-staging>` for a human-writable staging directory. On the validated
-installation, `<work-home>` is `/home/local-gpt-work`.
+Use the current human-controlled checkout to prepare an approved application
+workspace and to launch ChatGPT Work as `local-gpt-work`. `README.md` defines
+the architecture; `SETUP.md` is authoritative for host installation and
+persistent UFW lifecycle. `RUNBOOK.md` documents database operation and
+recovery.
 
 ## Refresh the BinanceBot databases
 
@@ -36,128 +14,86 @@ retry from a verified local dump. The
 [database runbook](RUNBOOK.md#unattended-postgresql-dump-and-restore)
 covers detached execution and recovery.
 
-## Step 1: synchronize the human application repository
+## Prepare the BinanceBot environment
 
-The human operator synchronizes and reviews the real application repository
-using the human's normal Git credentials. Neither the infrastructure checkout
-nor the restricted Work account performs this synchronization.
-
-## Step 2: approve a source revision
-
-Select a specific application commit after reviewing it. Versioned project
-documentation such as `README.md`, `AGENTS.md`, `CHANGELOG.md`, and `docs/` is
-the normal historical and architectural context available to Work.
-
-## Step 3: prepare and consume deterministic source
-
-Step 3 has two deliberately separate commands.
-
-### 3A. Human-side handoff preparation
-
-As the human operator, export the approved revision into new paths in a
-human-writable staging directory:
+Run from the human-controlled checkout after completing
+[helper installation](SETUP.md#install-the-reviewed-binancebot-helpers). Stop
+Work and application writers before a refresh or reset.
 
 ```bash
-./prepare-work-source.sh \
-  /path/to/human-owned/application-repository \
-  <full-approved-commit-id> \
-  <human-staging>/<project>-<commit>.tar \
-  <human-staging>/<project>-<commit>.provenance
+./prepare-codex-env --status
+./prepare-codex-env --check
+./prepare-codex-env --list-dumps
+./prepare-codex-env --refresh
+./prepare-codex-env --reuse-dump "$HOME/binancebot-snapshots/<snapshot-directory>"
+./prepare-codex-env --reset-work
 ```
 
-This command resolves the immutable commit, uses `git archive`, validates the
-snapshot, and publishes a read-only source archive plus provenance. It does not
-create a Work workspace or initialize Work's Git repository. It never copies
-the human working tree, `.git`, untracked or ignored files, local `.env` files,
-caches, dumps, remotes, credentials, SSH keys, or human Git configuration merely
-because they exist locally. Files intentionally tracked by the approved commit
-remain part of the approved snapshot.
+`--refresh` explicitly requests a new production snapshot. `--reuse-dump`
+operates locally and accepts a managed snapshot directory or an approved
+archive file with `--sha256 <approved-digest>`. Reset discards changes in the
+disposable Work database. A matching completed snapshot with usable Work is
+reused as-is. If a refresh fails after the dump is published, use the printed
+archive path with `--reuse-dump`.
 
-Both output paths must be absent. An existing artifact is never overwritten.
-After preparation, use an already-authorized host procedure to place copies in
-`<work-home>/repos/`, owned by the restricted account. This repository does not
-invent an ACL, shared group, or sudo rule for that transfer.
-
-The restricted account intentionally controls its handoff directory and may
-modify, replace, or delete artifacts there. Mode `0444`, provenance, and
-SHA-256 validation reduce accidental mistakes and detect an archive that no
-longer matches its paired metadata; they are not a security boundary against
-the artifact owner.
-
-### 3B. Restricted workspace initialization
-
-As the restricted Work account, consume the prepared pair into a new
-application workspace:
+Prepare the approved Git commit in its own workspace:
 
 ```bash
-<work-home>/git/gpt-work-local-sandbox/initialize-work-workspace.sh \
-  <work-home>/repos/<project>-<commit>.tar \
-  <work-home>/repos/<project>-<commit>.provenance \
-  <work-home>/workspaces/<project>
+./prepare-work-workspace.sh --ensure \
+  /absolute/path/to/application-repository '<full-approved-commit-id>' '<workspace-name>'
 ```
 
-This command validates provenance and archive SHA-256, extracts tracked source,
-and creates a new independent Git repository with exactly one deterministic
-baseline commit, a clean status, and no remote. It contains no upstream history
-or GitHub capability and exists only for local status, diff, patch, and review
-material.
+Reusing the workspace name and approved commit preserves existing workspace
+changes. Choose a new name for a clean task. Launch and select the workspace
+using [Routine launch](#routine-launch). See
+[the database runbook](RUNBOOK.md#unattended-postgresql-dump-and-restore) for first
+execution, recovery, and troubleshooting.
 
-The target workspace must be absent. Even an empty existing directory is
-rejected because it may represent work needing review. Never delete or replace
-an existing workspace merely to make initialization proceed.
+## Firewall operational implications
 
-### Completed validation
+The `run-work.sh` temporary IPv4 `iptables` protection is still
+required. It adds a UID/destination reject when the launcher
+starts and removes only a rule that invocation added during normal cleanup.
 
-The complete two-account source preparation and workspace initialization flow
-was validated on the reference host. The resulting workspace contained only
-approved tracked source, had a clean independent baseline commit and no remote,
-and excluded repository metadata and untracked or ignored source-tree files.
+After a human administrator has installed and accepted the persistent UFW
+policy in `SETUP.md`, both controls may coexist. The persistent policy survives
+launcher exit and reboot; the launcher continues to provide its existing
+per-session defense. A launcher simplification or removal of its temporary
+rule is deliberately a separate follow-up change. It requires all of these:
 
-Before launching Work, verify the workspace is clean, contains one commit, and
-has no remotes. Work's directory will be the application workspace, not the
-infrastructure checkout.
+1. persistent-policy installation and validation, including reboot;
+2. explicit human-administrator approval; and
+3. a separately reviewed implementation and rollback plan.
 
-## Step 4: run and review Work
+Work must not invoke the UFW helper, inspect production endpoints, modify
+firewall state, or receive new sudo privileges. Only an administrator runs the
+protected helper. General Internet access remains governed by the host's
+existing UFW policy; the persistent block applies solely to the Work UID and
+administrator-approved destination addresses.
 
-From a terminal inside the human Linux user's existing graphical login, supply
-the production VPS IPv4 address without recording it in the repository and run:
+## Routine launch
+
+From the human graphical session, export the currently approved IPv4
+as `PROD_VPS_IP` if the session has yet to set it. Then launch Work:
 
 ```bash
-PROD_VPS_IP='<production-vps-ip>' \
-  <work-home>/git/gpt-work-local-sandbox/run-work.sh
+./run-work.sh
 ```
 
-The launcher is run by the human, not from a separate graphical login for
-`local-gpt-work`. It checks or adds the owner-matched firewall reject rule
-before granting the restricted account access to the human's X display.
-It uses `sudo -u local-gpt-work` to start the installed ChatGPT
-application with the restricted account's runtime and D-Bus paths. Cleanup
-revokes graphical access and removes the firewall rule only if this invocation
-added it.
+If the temporary rule or launcher cleanup reports an error, do not alter the
+persistent UFW policy as an ad-hoc fix. Stop, retain the output for review, and
+have the administrator follow the inspection/recovery procedure in `SETUP.md`.
 
-After ChatGPT opens, the human selects the initialized application workspace in
-ChatGPT Work. Workspace selection remains an explicit UI step; `run-work.sh`
-only starts the application. Work must not clone, fetch, pull, push, or publish
-application projects to GitHub. Normal synchronization of the public
-infrastructure checkout is a separate control-plane operation.
+## Return review material to the human
 
-The current launcher behavior is deliberately preserved. Better logging, sudo
-prompt handling, firewall lifecycle, and process shutdown behavior are known
-follow-up work rather than part of this launcher replacement.
+Record the Work workspace's initial commit before making changes. At
+handoff, prepare a self-contained implementation report and a patch from that
+commit through the final state. Include staged, unstaged, and new files
+when they are part of the deliverable. Record the patch's SHA-256 and keep
+deliverables outside the application Git index.
 
-## Step 5: return review material to the human
-
-Work may implement changes, run tests, and create multiple local commits inside
-the disposable workspace. At the end, it writes its implementation report and
-patch outside the application repository, preferably under
-`<work-home>/deliverables`, so review artifacts cannot accidentally enter an
-application commit. The patch must represent the complete difference between
-the initialized Work baseline and final `HEAD`, not merely the last Work
-commit. Record its SHA-256 before transfer.
-
-The human copies the report and patch to a human-owned review location, verifies
-the recorded checksum, and checks the patch against the approved original
-application repository before changing it:
+The human copies the patch to a protected review directory, verifies the
+checksum, and checks it against the approved human application checkout:
 
 ```bash
 sha256sum /path/to/WORK_CHANGES.patch
@@ -165,23 +101,7 @@ git -C /path/to/human-owned/application-repository apply --check \
   /path/to/WORK_CHANGES.patch
 ```
 
-If those checks succeed, the human applies the patch, inspects the actual diff,
-runs the relevant test suite, and decides whether to create a new human-side
-commit. Work's internal commits and the human repository have independent
-histories, so Work commit hashes must not be used for Git operations in the
-human repository. The patch is the supported integration mechanism. Direct
-human Git access to the Work workspace is unnecessary; do not add
-`safe.directory`, change workspace ownership, or create shared Git access for
-this purpose.
-
-### Completed E2E validation
-
-The complete application handoff, isolated implementation, patch return, and
-human review and integration workflow was successfully validated end to end.
-The validation confirmed that application development requires neither a
-remote nor GitHub credentials in the Work repository and that the patch is a
-sufficient boundary between the independent Work and human Git histories.
-
-The preferred future output directory, `/home/local-gpt-work/deliverables`,
-was created after this run with owner `local-gpt-work` and mode `0755`. Its use
-has therefore been prepared but not yet validated end to end.
+The human then applies the patch, inspects the actual diff, reruns the relevant
+tests, and decides whether to create an independent commit. Work and human
+commit histories are independent. Keep the Work workspace Work-owned with no
+remote.

@@ -1,148 +1,101 @@
 # Repository agent workflow
 
-This file defines how agents work in this repository. See `README.md` for the
-database architecture, security model, operating procedures, and recovery
-guidance.
+See `README.md` for architecture, commands, boundaries, and E2E prerequisites.
 
 ## Safety
 
-- The architecture is generic, but the privileged helper sources still use
-  fixed reference-installation names. Treat those constants as security-
-  sensitive implementation coupling, not as the generic architecture.
-- Treat `binancebot_work` as disposable and `binancebot_work_baseline` as
-  protected.
-- Preserve two separate administrative operations: routine work reset and
-  occasional baseline refresh. Never combine them or broaden the reset helper
-  into a baseline-administration command.
-- Do not access production credentials or production systems unless the human
-  explicitly authorizes it.
-- `db_refresh` and its archive store are human-only. Implement and test the
-  workflow with synthetic data. Only an explicitly authorized human
-  `--full` may access the production service.
-- Work must not obtain, receive, copy, or retain production-derived dumps.
-  Production-derived dumps must remain human-controlled and outside the
-  restricted Work account and workspace.
-- Do not use `sudo`, change system configuration, modify PostgreSQL, or execute
-  either administrative helper unless the human explicitly authorizes it.
-- Never ask a human to run repository code with `sudo` or as `postgres`.
-  Privileged execution must use the separately reviewed, protected installed
-  copies documented in `README.md`.
-- The only privileged operation intended to be available to `local-gpt-work`
-  is exact, no-argument execution of
-  `/usr/local/sbin/reset-binancebot-work` as the `postgres` OS user. Baseline
-  refresh is initiated by the human administrator through the separately
-  installed `/usr/local/sbin/refresh-binancebot-baseline`; it is never
-  authorized to `local-gpt-work`.
-- Work must never push, create a pull request, publish changes, or otherwise
-  modify a remote repository unless the human explicitly authorizes
-  publication after review.
-- Never weaken filesystem, PostgreSQL, or privilege boundaries to make a task
-  easier.
+- Treat `binancebot_work` as disposable and its baseline as protected.
+- Keep refresh and reset separate.
+- Never elevate repository helper source.
+- Never execute administrative helpers or change PostgreSQL, sudoers, firewall,
+  permissions, installed files, or host configuration without explicit human
+  authorization.
+- Never access production systems, credentials, or dump contents without
+  explicit authorization. Dumps remain human-controlled and outside Work.
+- Work receives only exact no-argument execution of the installed reset helper.
+- Preparation and launch scripts run only from a human-controlled checkout.
+- `db_refresh`, its database backend, and its archive storage are human-only.
+  Implement and test with synthetic data. Only an explicitly authorized
+  human refresh may access the production service.
+- Never weaken security boundaries or publish remotely without authorization.
+
+## Four-script architecture
+
+The primary scripts are:
+
+1. `refresh_baseline.sh`: source for human-only protected refresh;
+2. `reset-binancebot-work`: source for fixed protected Work reset;
+3. `prepare-work-workspace.sh`: human-created workspace from approved commit;
+4. `run-work.sh`: human-launched ChatGPT process as `local-gpt-work`.
+
+Do not reintroduce repository dumps, repository-local snapshot acquisition, source archives,
+provenance sidecars, separate initialization, inventories, or additional
+installation frameworks without an approved design. The human preparation
+entry point may acquire an explicitly requested snapshot and record its
+checksum in private storage outside Git and Work.
+
+## Documentation Maintenance Policy
+
+The authoritative documentation is:
+
+- `README.md`: architecture, objectives, security model, and accepted design
+  decisions;
+- `SETUP.md`: first-time Ubuntu installation/configuration, including
+  prerequisites, commands, permissions, security controls, verification, and
+  recovery;
+- `WORKFLOW.md`: repeatable Work-task preparation, execution, testing,
+  deliverables, review, integration, cleanup, maintenance, and recovery; and
+- `AGENTS.md`: agent permissions, restrictions, collaboration rules, and this
+  documentation policy.
+
+`RUNBOOK.md` is planned for future consolidation into `WORKFLOW.md`; do not
+perform that consolidation or delete documents without explicit authorization.
+
+- Every implementation task must assess its impact on all four authoritative
+  documents. Required documentation updates belong in the same reviewable
+  change; a task is incomplete while they are missing or inconsistent. If none
+  are required, say why in its implementation report.
+- Update `SETUP.md` when installation steps, host configuration, dependencies,
+  permissions, PostgreSQL setup, firewall rules, or security controls change.
+  Update `WORKFLOW.md` when operational task procedures change. Update
+  `README.md` when architecture, design decisions, or accepted risks change.
+  Update `AGENTS.md` when agent permissions, security restrictions, or
+  collaboration rules change.
+- Document actual implemented behavior, not intentions presented as fact. Draft
+  documentation during implementation if useful, but verify it against the
+  tested implementation before completion. Clearly distinguish verified
+  procedures from untested steps and from verification requiring a human
+  administrator or a reboot.
+- Avoid duplicating operational procedures across documents; link to the
+  authoritative document instead. Do not silently overwrite, restore, rename,
+  or delete documentation to meet this policy. Report missing or conflicting
+  documentation and request authorization for structural changes.
+- These requirements preserve existing security boundaries. They do not
+  authorize privileged operations, host modifications, production access, or
+  firewall changes.
 
 ## Git workflow
 
-- Inspect the repository and current Git state before modifying files.
-- Work may create a local commit when completing an implementation task and
-  preparing the exact change for independent review. Work may amend that local
-  review commit when addressing requested review changes. Creating or amending
-  a local commit is not publication and requires no separate human
-  authorization.
-- Stage only files relevant to the task and prefer one coherent commit for one
-  coherent task.
-- Independent review approval applies only to the exact commit SHA reviewed.
-  Amending or replacing that commit invalidates the previous approval, and the
-  new commit must be reviewed again before publication.
-- Never include temporary review or handoff artifacts in a commit.
+- Inspect Git state before editing and preserve unrelated changes.
+- Stage only task files.
+- Do not commit unless the task calls for it.
+- Never push, publish, or create a pull request without explicit authorization.
+- Approval applies only to the exact reviewed commit.
 
 ## Work artifacts
 
-At the end of substantive work, generate or overwrite the artifact appropriate
-to the work performed:
+For substantive investigation or planning, create the corresponding ignored
+`INVESTIGATION_WORK.md` or `PLANNING_WORK.md`.
 
-- Investigation, research, or substantial analysis: `INVESTIGATION_WORK.md`.
-- Planning, design, or architecture: `PLANNING_WORK.md`.
-- Implementation or repository modification: `IMPLEMENTATION_WORK.md`.
+Whenever repository files change, create ignored, self-contained:
 
-Whenever repository files were modified, also generate or overwrite
-`REVIEW.md`. `IMPLEMENTATION_WORK.md` is the implementer's self-contained
-account of what it did; `REVIEW.md` is a separate, concise handoff that equips
-an independent reviewer to evaluate the actual repository state. It must not
-duplicate or replace the implementation report, and it must not perform the
-review itself.
+- `IMPLEMENTATION_WORK.md`: task, implementation, decisions, files, tests,
+  deviations, commit status, final Git status, warnings, next step.
+- `REVIEW.md`: objective, scope, constraints, starting revision/branch,
+  files, intended changes, tests, risks, deferred work, non-destructive
+  verification, commit status, and expected reviewer outcome. It must direct
+  reviewers to inspect the actual diff.
 
-Multiple artifacts are appropriate only when a task genuinely contains multiple
-substantive phases. Do not create separate investigation or planning artifacts
-for routine analysis or planning performed as part of a normal implementation.
-Every artifact must be self-contained and understandable without access to the
-conversation.
-
-`INVESTIGATION_WORK.md` must include:
-
-- the question or problem investigated;
-- relevant context;
-- evidence inspected;
-- findings;
-- uncertainties and limitations;
-- conclusions; and
-- the recommended next step.
-
-`PLANNING_WORK.md` must include:
-
-- the objective;
-- relevant current state;
-- proposed approach;
-- important design decisions;
-- implementation steps;
-- risks and failure modes;
-- acceptance criteria; and
-- unresolved questions.
-
-`IMPLEMENTATION_WORK.md` must include:
-
-- the requested task;
-- implementation performed;
-- important decisions and assumptions;
-- files changed;
-- tests and checks executed, with results;
-- deviations from the plan, if any;
-- the commit hash and message, if applicable;
-- final Git status;
-- unresolved issues or warnings; and
-- the recommended next step.
-
-`REVIEW.md` must be self-contained and understandable without access to the
-conversation. It must include:
-
-- the review objective;
-- the requested scope and important constraints;
-- the starting Git revision and branch, when known;
-- the files changed;
-- a concise description of the intended changes;
-- tests and checks already executed by the implementer;
-- known risks, unresolved issues, and intentionally deferred work;
-- explicit instructions to inspect the actual Git diff rather than trusting
-  `IMPLEMENTATION_WORK.md`;
-- suggested non-destructive verification commands;
-- whether a commit was created and, if so, its hash; and
-- the expected reviewer outcome: approve, request changes, or identify
-  blockers.
-
-An approval recorded through this review process applies only to the exact
-commit SHA reviewed. Any amended or replacement commit requires a new review.
-
-If the task created a commit, additionally generate or overwrite
-`WORK_CHANGES.patch` with:
-
-```bash
-git format-patch -1 HEAD --stdout > WORK_CHANGES.patch
-```
-
-The patch must represent the exact commit submitted for review. If that commit
-is amended or replaced, regenerate the patch from the new commit before
-requesting another review. If no commit was created during the current task,
-remove any stale `WORK_CHANGES.patch` so it cannot be mistaken for current
-work.
-
-`INVESTIGATION_WORK.md`, `PLANNING_WORK.md`, `IMPLEMENTATION_WORK.md`,
-`REVIEW.md`, and `WORK_CHANGES.patch` are ephemeral handoff artifacts. They
-must remain ignored and must never be committed.
+Never commit these artifacts. If a task creates a commit, generate ignored
+`WORK_CHANGES.patch` from that exact commit. If no commit is created, remove
+any stale patch.

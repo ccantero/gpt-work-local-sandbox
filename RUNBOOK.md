@@ -94,3 +94,13 @@ verify the approved human policy as described in [SETUP.md](SETUP.md).
 Exit status zero means the requested stages finished. A failure returns
 nonzero and names the stage. A handled interruption exits with 129, 130,
 or 143 for HUP, INT, or TERM respectively.
+
+## Prepare and launch an application workspace
+
+From the human-controlled checkout, prepare a full approved application
+commit with `prepare-work-workspace.sh`. Launch Work separately from the
+human graphical session with the approved `PROD_VPS_IP` already available
+to the launcher. Select the resulting workspace in ChatGPT Work. See
+[WORKFLOW.md](WORKFLOW.md#prepare-the-binancebot-environment) for commands
+and patch handoff, and [SETUP.md](SETUP.md#persistent-work-egress-protection)
+for the separately administered UFW policy.

@@ -161,8 +161,10 @@ reference notebook and reached the following accepted state:
 -   snapshot dumps are `0600`;
 -   the public infrastructure repository can be cloned and pulled over HTTPS
     by the restricted account without GitHub credentials; and
--   the complete application source handoff and isolated workspace
-    initialization flow passed its real-host two-account validation.
+-   the earlier application source handoff passed real-host two-account
+    validation. The current direct workspace preparation is covered by
+    `tests/test-prepare-work-workspace.sh` and still needs live validation
+    on a fresh host.
 
 The fresh-machine bootstrap below is intended to reproduce that state,
 but was not itself executed end-to-end during the reference promotion.
@@ -237,75 +239,25 @@ should not gain access to the human user's private files or credentials.
 This project does not claim that Unix-user separation is equivalent to a
 VM.
 
-### Infrastructure checkout and application directories
+### Human checkout and Work directories
 
-The current reference installation has these directories:
+Run workspace preparation and the launcher from a human-controlled checkout.
+Keep the application repository in human-controlled storage that the Work
+account cannot access. Work receives only files from the approved commit in
+its own independent workspace.
 
-``` text
-/home/local-gpt-work/git/gpt-work-local-sandbox
-/home/local-gpt-work/repos
-/home/local-gpt-work/workspaces
-/home/local-gpt-work/deliverables
+After the Work account exists, the authorized administrator creates
+`/home/local-gpt-work/workspaces` if needed. It must be a real directory owned
+by `local-gpt-work`. The operator also needs the existing authorization to
+run workspace commands as that account. Check the directory before use:
+
+```bash
+stat -c '%F %U:%G %a %n' /home/local-gpt-work/workspaces
 ```
 
-The application handoff and workspace workflow has been validated using the
-first three paths. The `deliverables/` path was prepared later and is addressed
-separately below.
-
-The first is the restricted runtime checkout of this infrastructure
-repository. The repository is public: reviewed infrastructure changes follow
-the normal human commit/push and restricted clone/pull path over public HTTPS.
-The restricted account needs no GitHub token, SSH key, or human credentials for
-this synchronization. This control-plane exception applies only to the
-infrastructure repository; application repositories continue to use approved
-archives and provenance.
-
-`repos/` receives prepared application source/provenance. `workspaces/`
-contains disposable application workspaces initialized from those snapshots.
-`deliverables/` is the intended stable location for reports and patches kept
-outside application repositories. On the reference host `repos/` and
-`workspaces/` were created and verified as:
-
-``` text
-owner: local-gpt-work
-group: local-gpt-work
-mode:  0755
-```
-
-For a new host, an authorized human administrator may create those three exact
-directories after the account exists, using the host's normal administrative
-procedure, then verify them:
-
-``` bash
-stat -c '%U:%G %a %n' \
-  /home/local-gpt-work/repos \
-  /home/local-gpt-work/workspaces \
-  /home/local-gpt-work/deliverables
-```
-
-Do not move them to `/srv`, add a shared group or ACL, or create another sudo
-boundary for source transfer. `local-gpt-work` intentionally controls both
-source and workspace directories and the deliverables directory, including the
-ability to modify or remove artifacts in them.
-Archive SHA-256/provenance checks remain useful for integrity and deterministic
-pairing, but do not protect artifacts from their owner.
-
-Because mode `0755` does not normally let the human operator write into a
-directory owned by `local-gpt-work`, prepare source artifacts in a
-human-writable staging location and use the already-authorized host procedure
-to place copies in `repos/` with `local-gpt-work` ownership. This repository
-does not define a new privilege mechanism for that transfer.
-
-The complete source preparation and workspace initialization flow was validated
-on the reference host. It produced a verified source snapshot and a clean,
-independent one-commit workspace with no remote, containing only the approved
-tracked source. Step 3 therefore has no pending real-host initialization check;
-see `WORKFLOW.md` for the concise validation record.
-
-The `deliverables/` directory was created later as
-`local-gpt-work:local-gpt-work` mode `0755`. It was prepared after the
-successful E2E validation, so its future use has not yet been validated by
-another E2E run.
+The reference directory mode is `0755`. Retain the human ownership and
+access restrictions on the infrastructure and application checkouts. See
+[WORKFLOW.md](WORKFLOW.md) for preparation and patch review.
 
 ------------------------------------------------------------------------
 
@@ -812,53 +764,9 @@ sudoers                            valid
 
 ### Application source, implementation, and integration
 
-For each application task:
-
-1.  The human selects an approved commit and runs `prepare-work-source.sh` to
-    create a new archive and provenance pair in human-writable staging.
-2.  Using the already-authorized host transfer procedure, place copies in
-    `/home/local-gpt-work/repos` with restricted-account ownership.
-3.  As `local-gpt-work`, run `initialize-work-workspace.sh` with that pair and
-    a new path under `/home/local-gpt-work/workspaces`. Verify a clean
-    one-commit repository with no remote.
-4.  Launch ChatGPT Work and explicitly select that application workspace. Work
-    may edit, test, and make local commits without GitHub credentials.
-5.  Have Work write a self-contained implementation report and a patch covering
-    the complete baseline-to-final-`HEAD` difference outside the application
-    repository. Record the patch SHA-256. The intended future location is
-    `/home/local-gpt-work/deliverables`; it is prepared but has not yet been
-    exercised in an E2E run.
-6.  Copy the deliverables to a human-owned review directory. The human verifies
-    the SHA-256, runs `git apply --check` against the original repository,
-    applies the patch, inspects the actual diff, and runs the relevant tests.
-7.  If accepted, the human creates an independent commit in the original
-    repository and alone decides whether to publish it.
-
-Do not use Work's internal commit hashes in the human repository. Do not make
-the Work workspace a shared repository, change its ownership, or add
-`safe.directory`; the patch is the supported integration boundary. See
-`WORKFLOW.md` for the validated workflow and detailed rationale.
-
-### Launch ChatGPT Work
-
-The human starts Work from a terminal in their existing graphical Linux
-session; `local-gpt-work` does not need or use a separate graphical login.
-Provide the production VPS IPv4 address at invocation time without storing it
-in the repository:
-
-``` bash
-PROD_VPS_IP='<production-vps-ip>' \
-  /home/local-gpt-work/git/gpt-work-local-sandbox/run-work.sh
-```
-
-The launcher temporarily grants X access to `local-gpt-work`, ensures the
-owner-matched firewall reject rule exists, and switches users to start ChatGPT
-with the restricted account's runtime and D-Bus paths. Its cleanup revokes X
-access and removes the firewall rule only when that invocation added it.
-
-Logging, sudo prompt handling, firewall lifecycle, and process shutdown
-behavior remain known follow-up improvements. Do not redesign those behaviors
-during routine setup or operation.
+Prepare an approved commit with `prepare-work-workspace.sh` and select its
+independent workspace in ChatGPT Work. Follow [WORKFLOW.md](WORKFLOW.md) for
+the exact preparation, launch and patch integration procedures.
 
 ### Development
 
@@ -938,15 +846,13 @@ answer all of these with evidence:
 -   [ ] Local sudo implementation/version checked.
 -   [ ] `local-gpt-work` OS account exists and is not in privileged
     groups.
--   [ ] `/home/local-gpt-work/repos` is `local-gpt-work:local-gpt-work`
-    mode `0755`.
 -   [ ] `/home/local-gpt-work/workspaces` is
     `local-gpt-work:local-gpt-work` mode `0755`.
 -   [ ] `/home/local-gpt-work/deliverables` is
     `local-gpt-work:local-gpt-work` mode `0755` (prepared on the reference host;
     use in a new E2E run remains unvalidated).
--   [ ] Public-HTTPS infrastructure Git distribution is distinct from
-    application source handoff and requires no GitHub credentials.
+-   [ ] The human checkout is protected from Work and the human has the
+    existing authorization needed to prepare an approved workspace.
 -   [ ] PostgreSQL role has only intended attributes.
 -   [ ] PostgreSQL role has no unintended memberships.
 -   [ ] Baseline is owned/administered by `postgres`.
@@ -966,3 +872,155 @@ answer all of these with evidence:
 
 When all boxes are supported by actual host output, the machine
 reproduces the intended sandbox boundary.
+
+## Persistent Work egress protection
+
+`configure-work-ufw-policy.sh` is a root-managed UFW configuration helper. It
+is not available to `local-gpt-work`, creates no sudo permission, and changes
+neither PostgreSQL nor the reset policy. It resolves that account's UID when it
+runs, then places a marked `work-uid-output` chain in UFW's `before.rules`.
+That chain is called before UFW accepts `RELATED,ESTABLISHED` output, so the
+specified destinations are rejected even if a Work-owned connection already
+exists. The same controlled block can be placed in `before6.rules` only when
+the administrator has approved IPv6 destinations and UFW IPv6 is enabled.
+
+The following has **not** been validated by this repository: the host's active
+UFW file shape, UFW/libvirt ordering, iptables-nft translation, live traffic,
+or reboot persistence. Use a local console or another approved recovery path;
+do not make the first reload over an unrecoverable remote-only session.
+
+### Install after independent review
+
+From the human-controlled checkout, first run the non-privileged fixture test:
+
+```bash
+tests/test-configure-work-ufw-policy.sh
+```
+
+As the human administrator, inspect the active policy and exact UFW hook
+before changing anything. Stop if UFW is inactive, the shown `before.rules`
+does not contain the expected `ufw-before-output` established rule, or local
+libvirt policy is not understood:
+
+```bash
+sudo ufw status verbose
+sudo iptables -V
+sudo iptables -S ufw-before-output
+sudo iptables -S | grep -E 'libvirt|ufw-' || true
+sudo sed -n '/ufw-before-output/,+12p' /etc/ufw/before.rules
+sudo sed -n '/ufw-before-output/,+12p' /etc/ufw/before6.rules
+grep -Fx 'IPV6=yes' /etc/default/ufw || true
+id -u local-gpt-work
+```
+
+Before installing, keep recoverable copies outside the Work account and copy
+the reviewed helper to a protected path. The two SHA-256 values must match:
+
+```bash
+sudo cp -a /etc/ufw/before.rules /etc/ufw/before.rules.pre-gpt-work
+sudo cp -a /etc/ufw/before6.rules /etc/ufw/before6.rules.pre-gpt-work
+sudo install -o root -g root -m 0750 \
+  ./configure-work-ufw-policy.sh /usr/local/sbin/configure-work-ufw-policy
+sha256sum ./configure-work-ufw-policy.sh
+sudo sha256sum /usr/local/sbin/configure-work-ufw-policy
+sudo stat -c '%U:%G %a %n' /usr/local/sbin/configure-work-ufw-policy
+```
+
+Install approved addresses, replacing the placeholders with administrator-held
+values. Do not use a production address merely as a connectivity-test target.
+IPv6 arguments are optional; omit them until their production values are
+approved and `IPV6=yes` is verified.
+
+```bash
+sudo /usr/local/sbin/configure-work-ufw-policy install \
+  --ipv4 '<APPROVED_PRODUCTION_IPV4>' \
+  --ipv6 '<APPROVED_PRODUCTION_IPV6>'
+```
+
+Repeated installation rebuilds only the managed block, deduplicates supplied
+addresses, and reloads UFW. The helper requires root and the canonical
+installed path. It serializes transactions with a lock in `/etc/ufw` and
+leaves UFW activation to the administrator.
+It rejects an unexpected, incomplete, duplicated, or incorrectly ordered
+managed block rather than guessing. It first generates and validates both IPv4
+and IPv6 candidate files, requiring the matching `iptables-restore --test`
+utility before replacing either live file. Custom-chain
+declarations are emitted in the *filter declaration section before any -A
+rules. It verifies and preserves owner, group, mode, and modification time on
+candidates and rollback copies; ACLs, extended attributes, and security labels
+are not independently verified. It retains copies of both original files until
+the reload succeeds. If either replacement or the first reload fails, it
+restores both files by staging a verified same-directory copy and atomically
+replacing each target; after a reload failure it also reloads that restored
+configuration.
+
+`HUP`, `INT`, or `TERM` during either file replacement triggers the same
+persistent-file restoration. An interruption during restoration, the first
+reload, or the rollback reload can leave the effective kernel state unknown, so
+the helper retains and reports rollback-copy paths rather than guessing. The
+same retention occurs when a file restoration or rollback reload fails. In
+every such case, stop and use the recovery procedure below; do not retry
+blindly.
+
+### Executable non-production validation
+
+Before inserting production addresses, use administrator-controlled,
+non-production IPv4 and optional IPv6 endpoints. Install those test
+destinations with the protected helper, then use a bounded request as the Work
+user and a comparison request as the human user. The Work request must reject;
+the comparison is governed by the existing UFW policy. Remove the test policy
+with the documented rollback command before installing approved production
+addresses. This procedure must never contact a production destination.
+
+### Verify and validate
+
+After installation, confirm the ordering and the exact numeric UID, then run
+the non-production traffic test below before considering the production policy
+accepted:
+
+```bash
+sudo iptables -S ufw-before-output
+sudo iptables -S work-uid-output
+sudo ip6tables -S work-uid-output
+sudo ufw status numbered
+```
+
+| Check | Expected result | Status in this repository |
+| --- | --- | --- |
+| Fixture install/update/remove and injected validator/replacement/interruption/reload/restore failures | Candidates and restored files retain contents and selected metadata; unrecoverable fixture failures retain rollback artifacts | Verified by `tests/test-configure-work-ufw-policy.sh`; does not validate live kernel state |
+| IPv4 non-production destination as `local-gpt-work` | Rejected | Human must perform with a controlled non-production endpoint |
+| Same IPv4 as another local user | Existing UFW policy decides; UID rule does not match | Human must perform |
+| Unlisted Internet destination as Work | Existing UFW policy decides; no broad deny added | Human must perform |
+| Approved IPv6 destination as Work | Rejected when IPv6 policy was installed | Human must perform |
+| Existing Work connection during installation | New packets to a listed destination reject because hook precedes established accept | Human must perform |
+| libvirt guest/network traffic | Existing libvirt policy remains functional | Human must perform locally |
+| Reboot | UFW reloads its persistent files and the `work-uid-output` chain/rules reappear | Human must perform from recoverable access |
+
+For reboot validation, record `iptables -S work-uid-output` and the relevant
+counter output before reboot, restart from console/recovery-capable access,
+then repeat `ufw status verbose`, the chain inspection, and the controlled
+non-production test. Do not remove the old temporary launcher protection as
+part of this validation.
+
+### Rollback and recovery
+
+The normal rollback removes only the marked managed block and reloads UFW:
+
+```bash
+sudo /usr/local/sbin/configure-work-ufw-policy remove
+sudo iptables -S work-uid-output
+```
+
+If the helper cannot safely remove an incomplete block, restore the pre-change
+copies after inspecting their ownership and contents, then reload UFW:
+
+```bash
+sudo cp -a /etc/ufw/before.rules.pre-gpt-work /etc/ufw/before.rules
+sudo cp -a /etc/ufw/before6.rules.pre-gpt-work /etc/ufw/before6.rules
+sudo ufw reload
+```
+
+If a reload disrupts management access, use the host console or the approved
+out-of-band recovery channel, restore those copies, and inspect UFW and
+libvirt state before retrying. Do not disable UFW, flush firewall tables, add
+sudo rights, or edit PostgreSQL as a recovery shortcut.
